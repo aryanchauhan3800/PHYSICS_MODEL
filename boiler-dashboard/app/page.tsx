@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from "react";
-import { Activity, ArrowUpRight, ArrowDownRight, ChevronRight, Droplets, Thermometer, Gauge, Zap, CircleDot, Cpu, BarChart2, Shield, Bell, Sliders, Moon, Sun, Clock, Database, Wifi, Lock, Eye, Download, RefreshCw } from "lucide-react";
+import { Activity, ArrowUpRight, ArrowDownRight, ChevronRight, Droplets, Thermometer, Gauge, Zap, CircleDot, Cpu, BarChart2, Shield, Bell, Sliders, Moon, Sun, Clock, Database, Wifi, Lock, Eye, Download, RefreshCw, TrendingUp, Flame } from "lucide-react";
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import BoilerSchematic from "../components/boiler/boiler-schematic";
 import { STAT_CARDS, STATUS_ROWS, TELEMETRY, ANALYTICS_DATA } from "../lib/mock-data";
@@ -21,6 +21,31 @@ interface LiveData {
   pump: number;
   ip: string;
   connected: boolean;
+  mode?: string;
+  autopilot?: {
+    mode: 'manual' | 'auto';
+    target_p: number;
+    status: 'idle' | 'heating' | 'coasting' | 'stabilizing';
+    forecast_p_5min: number;
+  };
+}
+
+interface PredictionTimelinePoint {
+  t_min: number;
+  T: number;
+  P: number;
+  L: number;
+}
+
+interface PredictionData {
+  status: string;
+  heater_power_kw: number;
+  demand_minutes: number;
+  target_pressure_bar: number;
+  time_to_target: number | null;
+  current: { T: number; P: number; L: number };
+  timeline: PredictionTimelinePoint[];
+  error?: string;
 }
 
 export default function Dashboard() {
@@ -39,18 +64,22 @@ export default function Dashboard() {
   const [liveData, setLiveData] = useState<LiveData>({
     mw: 0.0, Q: 0.0, Kv: 0.0, T: 0.0, P: 1.013, pump: 0, ip: "0.0.0.0", connected: false
   });
-  const [predictedData, setPredictedData] = useState<any>(null);
+  const [predictedData, setPredictedData] = useState<PredictionData | null>(null);
   const [liveAnalytics, setLiveAnalytics] = useState<any[]>([]);
   const [liveTelemetry, setLiveTelemetry] = useState<any[]>([]);
   const [lastSync, setLastSync] = useState("Just now");
   const [isHeaterLoading, setIsHeaterLoading] = useState(false);
 
+  // ── Demand inputs for prediction ──
+  const [demandMinutes, setDemandMinutes] = useState(10);
+  const [targetPressure, setTargetPressure] = useState(0);  // 0 = no target
+
   const handleHeaterToggle = async () => {
     if (!liveData.connected) return;
     
     setIsHeaterLoading(true);
-    const newStatus = liveData.Q > 0 ? "OFF" : "ON";
-    const command = `HEATER:${newStatus}`;
+    // If heater is currently pulling power (Q > 0), turn it off.
+    const command = liveData.Q > 0 ? "HEATER_OFF" : "HEATER_ON";
     
     try {
       const res = await fetch('/api/arduino', {
@@ -61,10 +90,36 @@ export default function Dashboard() {
       
       if (!res.ok) throw new Error("Failed to send command");
       console.log(`Heater command sent: ${command}`);
+      
+      // Trigger immediate refresh to show effect on prediction
+      fetchArduinoData();
     } catch (e) {
       console.error("Heater control error:", e);
     } finally {
-      // Small delay to let hardware respond before UI settles
+      setTimeout(() => setIsHeaterLoading(false), 500);
+    }
+  };
+
+  const handleAutopilotConfig = async (config: { mode?: string, target_p?: number }) => {
+    // Relaxed connection check to allow UI toggling during sync drops
+    console.log("🛠️ [Dashboard] handleAutopilotConfig triggered with:", config);
+    setIsHeaterLoading(true);
+    try {
+      const res = await fetch('/api/arduino', {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          autopilot: {
+            ...liveData.autopilot,
+            ...config
+          }
+        })
+      });
+      if (!res.ok) throw new Error("Failed to update autopilot");
+      fetchArduinoData();
+    } catch (e) {
+      console.error("Autopilot config error:", e);
+    } finally {
       setTimeout(() => setIsHeaterLoading(false), 500);
     }
   };
@@ -81,22 +136,29 @@ export default function Dashboard() {
     }
   }, [settings.darkMode]);
 
-  // Polling loop for Arduino Data
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    
-    const fetchArduinoData = async () => {
+  // Global fetch function for both polling and manual refreshes
+  const fetchArduinoData = async () => {
       try {
         const res = await fetch('/api/arduino');
         if (!res.ok) throw new Error("Failed to fetch telemetry");
         const data: LiveData = await res.json();
         setLiveData(data);
 
-        // Fetch prediction (T+300s)
-        const predRes = await fetch('/api/arduino?predict=true');
-        if (predRes.ok) {
-          const pData = await predRes.json();
-          setPredictedData(pData);
+        // Fetch prediction timeline with demand parameters
+        try {
+          const predParams = new URLSearchParams({
+            predict: 'true',
+            minutes: String(demandMinutes),
+            target_pressure: String(targetPressure),
+            _t: new Date().getTime().toString() // Cache buster
+          });
+          const predRes = await fetch(`/api/arduino?${predParams.toString()}`, { cache: 'no-store' });
+          if (predRes.ok) {
+            const pData: PredictionData = await predRes.json();
+            setPredictedData(pData);
+          }
+        } catch (predErr) {
+          console.warn('Prediction fetch failed:', predErr);
         }
         
         const now = new Date();
@@ -110,7 +172,8 @@ export default function Dashboard() {
             time: timeStr,
             date: dateStr,
             p: Math.max(0, data.P - 1.013).toFixed(2),
-            l: (data.mw * 10).toFixed(1), // Flow L/min
+            l: data.Water_Volume_Liters != null ? data.Water_Volume_Liters.toFixed(2) : '0.00', // Liters
+
             t: data.T.toFixed(1),
             status: data.connected ? (data.P > 1.3 ? 'Warning' : 'Optimal') : 'Offline'
           };
@@ -126,11 +189,11 @@ export default function Dashboard() {
             time: timeStr,
             pressure: pGauge,
             temperature: data.T,
-            waterLevel: data.mw * 10,
+            waterLevel: data.Water_Volume_Liters ?? 0.0,
             // Map actual metrics to the 0-100 layout domain for AreaChart
             vP: data.connected ? Math.min(100, Math.max(0, (pGauge / 0.3) * 100)) : 0, 
             vT: data.connected ? Math.min(100, Math.max(0, (data.T / 150) * 100)) : 0, 
-            vW: data.connected ? Math.min(100, Math.max(0, data.mw * 10)) : 0 
+            vW: data.connected ? Math.min(100, Math.max(0, ((data.Water_Volume_Liters ?? 0.0) / 5.0) * 100)) : 0 
           }];
           if (next.length > 50) next.shift();
           return next;
@@ -142,13 +205,16 @@ export default function Dashboard() {
       }
     };
 
+    useEffect(() => {
+    let interval: NodeJS.Timeout;
+
     if (settings.autoSync) {
       interval = setInterval(fetchArduinoData, 2000);
       fetchArduinoData(); // Fetch immediately
     }
 
     return () => clearInterval(interval);
-  }, [settings.autoSync]);
+  }, [settings.autoSync, demandMinutes, targetPressure]);
 
   // Generate dynamic STAT_CARDS from liveData
   const CURRENT_STAT_CARDS = [
@@ -191,33 +257,10 @@ export default function Dashboard() {
     }
   ];
 
-  // Generate dynamic PREDICTED_STAT_CARDS from physics model results
-  const PREDICTED_STAT_CARDS = CURRENT_STAT_CARDS.map(card => {
-    // Fallback to mock scale if prediction hasn't loaded yet
-    const hasPred = predictedData && liveData.connected;
-    let predValue: number;
-    let desc = "Prediction at t + 300s";
-
-    if (hasPred) {
-      if (card.label === 'Pressure') predValue = predictedData.P - 1.013;
-      else if (card.label === 'Temperature') predValue = predictedData.T;
-      else if (card.label === 'Flow Rate') predValue = predictedData.mw;
-      else if (card.label === 'Heat Power') predValue = predictedData.Q / 1000;
-      else predValue = parseFloat(card.value as string);
-    } else {
-      predValue = parseFloat(card.value as string) * 1.0; // Identity if no data
-      desc = liveData.connected ? "Calculating..." : "Offline";
-    }
-
-    return {
-      ...card,
-      value: Math.max(0, predValue).toFixed(card.label === 'Temperature' || card.label === 'Flow Rate' || card.label === 'Heat Power' ? 1 : 2),
-      description: desc,
-      bar: card.label === 'Pressure' ? Math.min(100, Math.max(0, (predValue / 0.3) * 100)) : 
-           card.label === 'Temperature' ? Math.min(100, Math.max(0, (predValue / 150) * 100)) : card.bar,
-      sparkData: card.sparkData // Keep current spark for UI consistency
-    };
-  });
+  // Compute forecast helpers
+  const hasForecast = predictedData && predictedData.status === 'active_prediction' && predictedData.timeline.length > 0;
+  const forecastTimeline = hasForecast ? predictedData.timeline : [];
+  const forecastFinal = hasForecast ? predictedData.timeline[predictedData.timeline.length - 1] : null;
 
   // Generate dynamic STATUS_ROWS
   const CURRENT_STATUS_ROWS = [
@@ -525,18 +568,340 @@ export default function Dashboard() {
             ))}
           </div>
 
-          {/* ── Stat Cards (Predicted State) ── */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
-            <p className="caps-label" style={{ margin: 0 }}>Predicted State (t + 300s)</p>
-          </div>
-          <div
-            className="stat-grid"
-            style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '12px' }}
-          >
-            {PREDICTED_STAT_CARDS.map((card, i) => (
-              <StatCard key={`${card.id}_pred`} card={card} index={i} />
-            ))}
-          </div>
+          {/* ── 10-Minute Forecast Panel ── */}
+          {hasForecast ? (
+            <div className="animate-fade-up delay-2" style={{
+              marginBottom: '12px',
+              borderRadius: 'var(--r-xl)',
+              overflow: 'hidden',
+              position: 'relative',
+              background: 'linear-gradient(165deg, rgba(39, 39, 42, 0.75) 0%, rgba(24, 24, 27, 0.85) 50%, rgba(9, 9, 11, 0.97) 100%)',
+              border: '1px solid rgba(255,255,255,0.08)',
+              boxShadow: '0 12px 48px rgba(0,0,0,0.50), inset 0 1px 0 rgba(255,255,255,0.1), 0 0 80px rgba(255,159,10,0.04)',
+            }}>
+              {/* Ambient glow */}
+              <div style={{
+                position: 'absolute', top: '-40px', left: '15%',
+                width: '300px', height: '180px',
+                background: 'radial-gradient(ellipse, rgba(255,159,10,0.06), transparent 70%)',
+                pointerEvents: 'none', filter: 'blur(30px)',
+              }} />
+              <div style={{
+                position: 'absolute', bottom: '-30px', right: '20%',
+                width: '250px', height: '150px',
+                background: 'radial-gradient(ellipse, rgba(255,59,48,0.04), transparent 70%)',
+                pointerEvents: 'none', filter: 'blur(25px)',
+              }} />
+              {/* Top accent line */}
+              <div style={{
+                position: 'absolute', top: 0, left: '10%', right: '10%', height: '1px',
+                background: 'linear-gradient(90deg, transparent, rgba(255,159,10,0.30), rgba(255,59,48,0.15), transparent)',
+              }} />
+
+              {/* Header */}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '18px 24px 0',
+                zIndex: 10, position: 'relative',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                  <div style={{
+                    width: '32px', height: '32px', borderRadius: '10px',
+                    background: 'linear-gradient(135deg, rgba(255,159,10,0.15), rgba(255,59,48,0.10))',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    border: '1px solid rgba(255,159,10,0.20)',
+                  }}>
+                    <Flame style={{ width: '15px', height: '15px', color: '#FF9F0A' }} />
+                  </div>
+                  <div>
+                  <h3 className="font-display" style={{ fontSize: '16px', fontWeight: 600, letterSpacing: '-0.02em', color: '#fff', margin: 0 }}>{demandMinutes}-Minute Forecast</h3>
+                    <p style={{ fontSize: '12px', color: 'rgba(255,255,255,0.40)', marginTop: '2px', fontWeight: 400, letterSpacing: '-0.01em' }}>
+                      Heating at {predictedData?.heater_power_kw ?? 1.0} kW — Physics-based prediction
+                    </p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '5px', padding: '3px 12px', borderRadius: '99px', background: 'rgba(255,159,10,0.10)', border: '1px solid rgba(255,159,10,0.20)' }}>
+                  <div style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#FF9F0A', animation: 'pulse-ring 1.6s ease-out infinite' }} />
+                  <span style={{ fontSize: '10px', fontWeight: 700, color: '#FF9F0A', letterSpacing: '0.08em' }}>ACTIVE</span>
+                </div>
+              </div>
+
+              {/* ── Demand Selectors Row ── */}
+              <div style={{
+                display: 'flex', alignItems: 'center', gap: '16px',
+                padding: '12px 24px 4px',
+                position: 'relative', zIndex: 10,
+              }}>
+                {/* Time Selector */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Clock style={{ width: '13px', height: '13px', color: 'rgba(255,255,255,0.40)' }} />
+                  <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.40)', fontWeight: 500 }}>Predict</span>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    {[1, 3, 5, 8, 10, 15, 20, 25].map(m => (
+                      <button
+                        key={m}
+                        onClick={() => setDemandMinutes(m)}
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: '8px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          border: demandMinutes === m ? '1px solid rgba(255,159,10,0.40)' : '1px solid rgba(255,255,255,0.10)',
+                          background: demandMinutes === m ? 'rgba(255,159,10,0.15)' : 'rgba(255,255,255,0.04)',
+                          color: demandMinutes === m ? '#FF9F0A' : 'rgba(255,255,255,0.50)',
+                          transition: 'all 0.2s ease',
+                        }}
+                      >
+                        {m}m
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Divider */}
+                <div style={{ width: '1px', height: '20px', background: 'rgba(255,255,255,0.08)' }} />
+
+                {/* Target Pressure Selector */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Gauge style={{ width: '13px', height: '13px', color: 'rgba(255,255,255,0.40)' }} />
+                  <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.40)', fontWeight: 500 }}>Target</span>
+                  <div style={{ display: 'flex', gap: '4px' }}>
+                    {[0, 1.2, 1.5, 1.8, 2.0, 2.5].map(p => (
+                      <button
+                        key={p}
+                        onClick={() => setTargetPressure(p)}
+                        style={{
+                          padding: '4px 10px',
+                          borderRadius: '8px',
+                          fontSize: '11px',
+                          fontWeight: 600,
+                          cursor: 'pointer',
+                          border: targetPressure === p ? '1px solid rgba(10,132,255,0.40)' : '1px solid rgba(255,255,255,0.10)',
+                          background: targetPressure === p ? 'rgba(10,132,255,0.15)' : 'rgba(255,255,255,0.04)',
+                          color: targetPressure === p ? '#0A84FF' : 'rgba(255,255,255,0.50)',
+                          transition: 'all 0.2s ease',
+                        }}
+                      >
+                        {p === 0 ? 'Off' : `${p} bar`}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Time to Target Badge */}
+                {targetPressure > 0 && predictedData?.time_to_target !== undefined && predictedData?.time_to_target !== null && (
+                  <div style={{
+                    marginLeft: 'auto',
+                    display: 'flex', alignItems: 'center', gap: '6px',
+                    padding: '4px 14px',
+                    borderRadius: '99px',
+                    background: predictedData.time_to_target === -1
+                      ? 'rgba(255,69,58,0.12)' : 'rgba(48,209,88,0.12)',
+                    border: predictedData.time_to_target === -1
+                      ? '1px solid rgba(255,69,58,0.25)' : '1px solid rgba(48,209,88,0.25)',
+                  }}>
+                    <span style={{
+                      fontSize: '11px', fontWeight: 700,
+                      color: predictedData.time_to_target === -1 ? '#FF453A' : '#30D158',
+                    }}>
+                      {predictedData.time_to_target === -1
+                        ? `Not reached in ${demandMinutes}m`
+                        : `${targetPressure} bar in ${predictedData.time_to_target} min`}
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              {/* Chart */}
+              <div style={{ height: '280px', padding: '12px 20px 4px', position: 'relative', zIndex: 5 }}>
+                <ResponsiveContainer width="100%" height="100%">
+                  <LineChart data={forecastTimeline} margin={{ top: 10, right: 15, left: -10, bottom: 5 }}>
+                    <defs>
+                      <linearGradient id="fcStrokeT" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#FF9F0A" />
+                        <stop offset="100%" stopColor="#FF6B35" />
+                      </linearGradient>
+                      <linearGradient id="fcStrokeP" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#0A84FF" />
+                        <stop offset="100%" stopColor="#40B0FF" />
+                      </linearGradient>
+                      <linearGradient id="fcStrokeL" x1="0" y1="0" x2="1" y2="0">
+                        <stop offset="0%" stopColor="#30D158" />
+                        <stop offset="100%" stopColor="#34C759" />
+                      </linearGradient>
+                      <filter id="fcGlowT" x="-30%" y="-30%" width="160%" height="160%">
+                        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+                        <feFlood floodColor="#FF9F0A" floodOpacity="0.4" result="color" />
+                        <feComposite in="color" in2="blur" operator="in" result="glow" />
+                        <feMerge><feMergeNode in="glow" /><feMergeNode in="SourceGraphic" /></feMerge>
+                      </filter>
+                      <filter id="fcGlowP" x="-30%" y="-30%" width="160%" height="160%">
+                        <feGaussianBlur in="SourceGraphic" stdDeviation="3" result="blur" />
+                        <feFlood floodColor="#0A84FF" floodOpacity="0.4" result="color" />
+                        <feComposite in="color" in2="blur" operator="in" result="glow" />
+                        <feMerge><feMergeNode in="glow" /><feMergeNode in="SourceGraphic" /></feMerge>
+                      </filter>
+                    </defs>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255,255,255,0.04)" />
+                    <XAxis
+                      dataKey="t_min"
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fontSize: 11, fill: 'rgba(255,255,255,0.30)', fontWeight: 500 }}
+                      tickFormatter={(v: any) => `${v}m`}
+                      dy={8}
+                    />
+                    <YAxis
+                      yAxisId="temp"
+                      domain={[0, 160]}
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fontSize: 11, fill: 'rgba(255,255,255,0.25)', fontWeight: 400 }}
+                      dx={-5}
+                      label={{ value: '°C', position: 'insideTopLeft', fill: 'rgba(255,255,255,0.20)', fontSize: 10, dy: -5, dx: 10 }}
+                    />
+                    <YAxis
+                      yAxisId="pressure"
+                      orientation="right"
+                      domain={[0, 3.5]}
+                      axisLine={false}
+                      tickLine={false}
+                      tick={{ fontSize: 11, fill: 'rgba(255,255,255,0.25)', fontWeight: 400 }}
+                      dx={5}
+                      label={{ value: 'bar', position: 'insideTopRight', fill: 'rgba(255,255,255,0.20)', fontSize: 10, dy: -5, dx: -10 }}
+                    />
+                    <Tooltip
+                      contentStyle={{
+                        background: 'rgba(24,24,27,0.95)',
+                        border: '1px solid rgba(255,255,255,0.10)',
+                        borderRadius: '12px',
+                        boxShadow: '0 8px 32px rgba(0,0,0,0.50)',
+                        padding: '12px 16px',
+                        backdropFilter: 'blur(16px)',
+                      }}
+                      labelStyle={{ color: 'rgba(255,255,255,0.45)', fontSize: '11px', fontWeight: 600, letterSpacing: '0.06em', marginBottom: '6px' }}
+                      itemStyle={{ color: 'rgba(255,255,255,0.90)', fontSize: '12.5px', fontWeight: 500, padding: '2px 0' }}
+                      labelFormatter={(v: any) => `t + ${v} min`}
+                      cursor={{ stroke: 'rgba(255,255,255,0.08)', strokeWidth: 1 }}
+                    />
+                    <Line yAxisId="temp" type="monotone" dataKey="T" name="Temperature" stroke="url(#fcStrokeT)" strokeWidth={2.5} dot={false} activeDot={{ r: 5, fill: '#FF9F0A', stroke: 'rgba(255,159,10,0.3)', strokeWidth: 4 }} filter="url(#fcGlowT)" />
+                    <Line yAxisId="pressure" type="monotone" dataKey="P" name="Pressure" stroke="url(#fcStrokeP)" strokeWidth={2} dot={false} activeDot={{ r: 4, fill: '#0A84FF', stroke: 'rgba(10,132,255,0.3)', strokeWidth: 4 }} filter="url(#fcGlowP)" />
+                    <Line yAxisId="temp" type="monotone" dataKey="L" name="Water Level" stroke="url(#fcStrokeL)" strokeWidth={1.5} dot={false} activeDot={{ r: 4, fill: '#30D158', stroke: 'rgba(48,209,88,0.3)', strokeWidth: 4 }} strokeDasharray="6 4" />
+                  </LineChart>
+                </ResponsiveContainer>
+              </div>
+
+              {/* Legend row */}
+              <div style={{ display: 'flex', justifyContent: 'center', gap: '24px', padding: '4px 0 12px', position: 'relative', zIndex: 5 }}>
+                {[
+                  { label: 'Temperature', color: '#FF9F0A' },
+                  { label: 'Pressure', color: '#0A84FF' },
+                  { label: 'Water Level', color: '#30D158', dashed: true },
+                ].map(item => (
+                  <div key={item.label} style={{ display: 'flex', alignItems: 'center', gap: '7px' }}>
+                    <div style={{
+                      width: '16px', height: '2px', borderRadius: '1px',
+                      background: item.color,
+                      boxShadow: `0 0 6px ${item.color}50`,
+                      ...(('dashed' in item && item.dashed) ? { backgroundImage: `repeating-linear-gradient(90deg, ${item.color} 0, ${item.color} 4px, transparent 4px, transparent 8px)`, background: 'none' } : {}),
+                    }} />
+                    <span style={{ fontSize: '11px', color: 'rgba(255,255,255,0.40)', fontWeight: 500 }}>{item.label}</span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Summary cards */}
+              <div style={{
+                display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)',
+                borderTop: '1px solid rgba(255,255,255,0.06)',
+                position: 'relative', zIndex: 5,
+              }}>
+                {forecastFinal && [
+                  {
+                    label: 'Temperature',
+                    icon: Thermometer,
+                    current: liveData.T,
+                    predicted: forecastFinal.T,
+                    unit: '°C',
+                    color: '#FF9F0A',
+                    decimals: 1,
+                  },
+                  {
+                    label: 'Pressure',
+                    icon: Gauge,
+                    current: Math.max(0, liveData.P - 1.013),
+                    predicted: forecastFinal.P,
+                    unit: 'bar',
+                    color: '#0A84FF',
+                    decimals: 3,
+                  },
+                  {
+                    label: 'Water Level',
+                    icon: Droplets,
+                    current: liveData.Water_Volume_Liters ?? 0.0,
+                    predicted: forecastFinal.L,
+                    unit: 'L',
+                    color: '#30D158',
+                    decimals: 3,
+                  },
+                ].map((m, i, arr) => {
+                  const delta = m.predicted - m.current;
+                  const isUp = delta >= 0;
+                  const DeltaIcon = isUp ? ArrowUpRight : ArrowDownRight;
+                  return (
+                    <div key={m.label} style={{
+                      padding: '16px 20px',
+                      borderRight: i < arr.length - 1 ? '1px solid rgba(255,255,255,0.06)' : 'none',
+                      display: 'flex', flexDirection: 'column', gap: '6px',
+                    }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <m.icon style={{ width: '12px', height: '12px', color: m.color, opacity: 0.7 }} />
+                        <span style={{ fontSize: '10px', fontWeight: 600, color: 'rgba(255,255,255,0.35)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>{m.label}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'baseline', gap: '6px' }}>
+                        <span className="num" style={{ fontSize: '22px', fontWeight: 700, color: '#fff', letterSpacing: '-0.03em' }}>
+                          {m.predicted.toFixed(m.decimals)}
+                        </span>
+                        <span style={{ fontSize: '12px', color: 'rgba(255,255,255,0.30)', fontWeight: 400 }}>{m.unit}</span>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <DeltaIcon style={{ width: '12px', height: '12px', color: isUp ? '#FF9F0A' : '#30D158' }} />
+                        <span style={{ fontSize: '11px', fontWeight: 600, color: isUp ? '#FF9F0A' : '#30D158' }}>
+                          {isUp ? '+' : ''}{delta.toFixed(m.decimals)}
+                        </span>
+                        <span style={{ fontSize: '10px', color: 'rgba(255,255,255,0.25)', marginLeft: '2px' }}>vs now</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            /* Idle state — no active forecast */
+            <div className="animate-fade-up delay-2" style={{
+              marginBottom: '12px',
+              padding: '24px',
+              borderRadius: 'var(--r-lg)',
+              background: 'var(--bg-elevated)',
+              border: '0.5px solid var(--border)',
+              boxShadow: 'var(--shadow-sm)',
+              display: 'flex', alignItems: 'center', gap: '16px',
+            }}>
+              <div style={{
+                width: '40px', height: '40px', borderRadius: '12px',
+                background: 'rgba(142,142,147,0.08)',
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                flexShrink: 0,
+              }}>
+                <TrendingUp style={{ width: '18px', height: '18px', color: 'var(--t3)' }} />
+              </div>
+              <div>
+                <p className="font-display" style={{ fontSize: '14px', fontWeight: 600, color: 'var(--t1)', letterSpacing: '-0.02em', margin: 0 }}>System Idle — No Active Forecast</p>
+                <p style={{ fontSize: '12.5px', color: 'var(--t3)', marginTop: '3px', fontWeight: 400 }}>Start the heater to generate a 10-minute physics-based prediction of temperature, pressure, and water level.</p>
+              </div>
+            </div>
+          )}
 
           {/* ── Main grid: Schematic + Sidebar ── */}
           <div
@@ -585,7 +950,13 @@ export default function Dashboard() {
 
               {/* Schematic */}
               <div style={{ height: '680px', position: 'relative', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                <BoilerSchematic />
+                <BoilerSchematic 
+                  isHeating={liveData.Q > 0} 
+                  mode={liveData.mode || 'AUTO'} 
+                  onToggleHeater={handleHeaterToggle}
+                  onSetAuto={() => handleAutopilotConfig({ mode: 'auto' })}
+                  isLoading={isHeaterLoading}
+                />
               </div>
             </div>
 
@@ -621,51 +992,151 @@ export default function Dashboard() {
                 </div>
               </div>
 
+              {/* Digital Twin Autopilot */}
+              <div className="card-premium animate-fade-up delay-3" style={{ 
+                padding: '20px', 
+                background: liveData.autopilot?.mode === 'auto' ? 'linear-gradient(165deg, rgba(10,132,255,0.08) 0%, rgba(0,0,0,0) 100%)' : 'var(--bg-elevated)',
+                border: liveData.autopilot?.mode === 'auto' ? '1px solid rgba(10,132,255,0.25)' : '1px solid var(--border)',
+                boxShadow: liveData.autopilot?.mode === 'auto' ? '0 8px 32px rgba(10,132,255,0.12)' : 'var(--shadow-sm)',
+                position: 'relative',
+                overflow: 'hidden'
+              }}>
+                {liveData.autopilot?.mode === 'auto' && (
+                  <div style={{
+                    position: 'absolute', top: '-10px', right: '-10px', width: '60px', height: '60px',
+                    background: 'radial-gradient(circle, rgba(10,132,255,0.1) 0%, transparent 70%)',
+                    zIndex: 0
+                  }} />
+                )}
+                
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '16px', position: 'relative', zIndex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <div style={{
+                      width: '32px', height: '32px', borderRadius: '10px',
+                      background: liveData.autopilot?.mode === 'auto' ? 'var(--blue)' : 'rgba(0,0,0,0.05)',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      color: liveData.autopilot?.mode === 'auto' ? '#fff' : 'var(--t3)',
+                      transition: 'all 0.3s var(--ease-apple)'
+                    }}>
+                      <Cpu size={16} />
+                    </div>
+                    <div>
+                      <h3 style={{ fontSize: '14.5px', fontWeight: 600, color: 'var(--t1)' }}>Digital Twin Autopilot</h3>
+                      <p style={{ fontSize: '11px', color: 'var(--t3)', fontWeight: 500 }}>{liveData.autopilot?.mode === 'auto' ? 'Active Proactive Control' : 'Manual Override Mode'}</p>
+                    </div>
+                  </div>
+                  <ToggleSwitch 
+                    active={liveData.autopilot?.mode === 'auto'}
+                    onToggle={() => handleAutopilotConfig({ mode: liveData.autopilot?.mode === 'auto' ? 'manual' : 'auto' })}
+                  />
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '14px', position: 'relative', zIndex: 1 }}>
+                  {/* Status Indicator */}
+                  <div style={{
+                    padding: '12px', borderRadius: '12px',
+                    background: 'rgba(0,0,0,0.03)',
+                    border: '0.5px solid var(--border)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'space-between'
+                  }}>
+                    <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--t3)' }}>Current Status</span>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <div className={liveData.autopilot?.status === 'heating' ? 'animate-pulse' : ''} style={{
+                        width: '6px', height: '6px', borderRadius: '50%',
+                        background: liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : '#8E8E93')
+                      }} />
+                      <span style={{ 
+                        fontSize: '11px', fontWeight: 700, 
+                        color: liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : 'var(--t2)'),
+                        textTransform: 'uppercase', letterSpacing: '0.04em'
+                      }}>
+                        {liveData.autopilot?.status || 'Idle'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* Target Selector */}
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                      <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--t3)' }}>Target Pressure</span>
+                      <span style={{ fontSize: '14px', fontWeight: 700, color: 'var(--blue)' }}>{liveData.autopilot?.target_p || 1.5} <span style={{ fontSize: '10px', opacity: 0.7 }}>BAR</span></span>
+                    </div>
+                    <div style={{ display: 'flex', gap: '8px' }}>
+                      {[1.2, 1.5, 1.8, 2.0, 2.2].map(p => (
+                        <button
+                          key={p}
+                          onClick={() => handleAutopilotConfig({ target_p: p })}
+                          style={{
+                            flex: 1, padding: '7px 0', borderRadius: '8px',
+                            background: liveData.autopilot?.target_p === p ? 'var(--blue)' : 'rgba(0,0,0,0.03)',
+                            color: liveData.autopilot?.target_p === p ? '#fff' : 'var(--t2)',
+                            fontSize: '11px', fontWeight: 600, border: 'none', cursor: 'pointer',
+                            transition: 'all 0.2s'
+                          }}
+                        >{p}</button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Forecast Insight */}
+                  <div style={{
+                    padding: '12px', borderRadius: '12px',
+                    background: 'rgba(0,113,227,0.04)',
+                    border: '0.5px dashed rgba(0,113,227,0.2)',
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
+                      <Eye size={12} color="var(--blue)" />
+                      <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--blue)', letterSpacing: '0.02em', textTransform: 'uppercase' }}>5m Predictive Insight</span>
+                    </div>
+                    <p style={{ fontSize: '12.5px', color: 'var(--t1)', fontWeight: 500, lineHeight: 1.4 }}>
+                      Model predicts <span className="num" style={{ fontWeight: 700, color: 'var(--blue)' }}>{liveData.autopilot?.forecast_p_5min || '0.0'} bar</span> in 5 mins.
+                    </p>
+                  </div>
+                </div>
+              </div>
+
               {/* Quick Actions */}
               <div className="card" style={{ padding: '18px 20px' }}>
-                <p className="caps-label" style={{ marginBottom: '14px' }}>Quick Actions</p>
+                <p className="caps-label" style={{ marginBottom: '14px' }}>Manual Overrides</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
                   {/* Heater Control Button */}
                   <button 
                     onClick={handleHeaterToggle}
-                    disabled={!liveData.connected || isHeaterLoading}
+                    disabled={!liveData.connected || isHeaterLoading || liveData.autopilot?.mode === 'auto'}
                     style={{
                       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                       padding: '12px 16px', borderRadius: '11px',
                       background: !liveData.connected ? 'rgba(0,0,0,0.05)' : (liveData.Q > 0 ? 'linear-gradient(135deg, #FF3B30 0%, #D70015 100%)' : 'linear-gradient(135deg, #34C759 0%, #248A3D 100%)'),
                       fontSize: '13.5px', fontWeight: 600, color: '#fff', letterSpacing: '-0.015em',
-                      boxShadow: !liveData.connected ? 'none' : (liveData.Q > 0 ? '0 4px 16px rgba(255,59,48,0.30)' : '0 4px 16px rgba(52,199,89,0.30)'),
+                      boxShadow: !liveData.connected || liveData.autopilot?.mode === 'auto' ? 'none' : (liveData.Q > 0 ? '0 4px 16px rgba(255,59,48,0.30)' : '0 4px 16px rgba(52,199,89,0.30)'),
                       transition: 'all 0.18s var(--ease-apple)',
-                      cursor: liveData.connected && !isHeaterLoading ? 'pointer' : 'not-allowed',
+                      cursor: liveData.connected && !isHeaterLoading && liveData.autopilot?.mode !== 'auto' ? 'pointer' : 'not-allowed',
                       border: 'none',
-                      opacity: liveData.connected ? 1 : 0.5,
+                      opacity: liveData.connected && liveData.autopilot?.mode !== 'auto' ? 1 : 0.5,
                     }}
-                    onMouseEnter={e => { if(liveData.connected && !isHeaterLoading) { (e.currentTarget).style.transform = 'translateY(-1px)'; (e.currentTarget).style.filter = 'brightness(1.1)'; } }}
-                    onMouseLeave={e => { if(liveData.connected && !isHeaterLoading) { (e.currentTarget).style.transform = 'translateY(0)'; (e.currentTarget).style.filter = 'none'; } }}
-                  >
+                   >
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       {isHeaterLoading ? <RefreshCw className="animate-spin" size={14} /> : <Zap size={14} />}
                       {liveData.Q > 0 ? 'Stop Heater' : 'Start Heater'}
                     </div>
-                    <ChevronRight style={{ width: '14px', height: '14px', opacity: 0.75 }} />
+                    {liveData.autopilot?.mode === 'auto' ? <Lock size={12} /> : <ChevronRight style={{ width: '14px', height: '14px', opacity: 0.75 }} />}
                   </button>
 
-                  <button className="btn-primary-premium" style={{
+                  <button 
+                    onClick={() => setActiveTab('analytics')}
+                    style={{
                     display: 'flex', alignItems: 'center', justifyContent: 'space-between',
                     padding: '12px 16px', borderRadius: '11px',
                     background: 'linear-gradient(135deg, #0077ed 0%, #0051a8 100%)',
                     fontSize: '13.5px', fontWeight: 600, color: '#fff', letterSpacing: '-0.015em',
                     boxShadow: '0 4px 16px rgba(0,113,227,0.30), inset 0 1px 0 rgba(255,255,255,0.12)',
                     transition: 'all 0.18s var(--ease-apple)',
-                    overflow: 'hidden',
-                    position: 'relative',
-                  }}
-                    onMouseEnter={e => { (e.currentTarget).style.boxShadow = '0 6px 24px rgba(0,113,227,0.45)'; (e.currentTarget).style.transform = 'translateY(-1px)'; }}
-                    onMouseLeave={e => { (e.currentTarget).style.boxShadow = '0 4px 16px rgba(0,113,227,0.30)'; (e.currentTarget).style.transform = 'translateY(0)'; }}
-                  >
-                    Run Simulation
-                    <ChevronRight style={{ width: '14px', height: '14px', opacity: 0.75 }} />
+                    border: 'none', cursor: 'pointer'
+                  }}>
+                    Optimize Performance
+                    <ArrowUpRight style={{ width: '14px', height: '14px', opacity: 0.75 }} />
                   </button>
+
 
                   {['Export Report', 'View Predictions'].map(label => (
                     <button key={label} style={{
@@ -786,7 +1257,7 @@ export default function Dashboard() {
 
                   {/* Level */}
                   <div className="num" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--t2)' }}>
-                    {row.l} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>%</span>
+                    {row.l} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>Liters</span>
                   </div>
 
                   {/* Temp */}
@@ -919,7 +1390,7 @@ export default function Dashboard() {
                         {row.p} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>bar</span>
                       </div>
                       <div className="num" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--t2)' }}>
-                        {row.l} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>%</span>
+                        {row.l} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>Liters</span>
                       </div>
                       <div className="num" style={{ fontSize: '13px', fontWeight: 500, color: 'var(--t2)' }}>
                         {row.t} <span style={{ fontSize: '10px', color: 'var(--t3)', fontWeight: 400 }}>°C</span>
@@ -974,7 +1445,7 @@ export default function Dashboard() {
                   icon={Thermometer} dataKey="temperature" data={liveAnalytics}
                 />
                 <GlowMetricCard
-                  title="Water Level" value={(liveData.mw * 10).toFixed(1)} unit="%"
+                  title="Water Level" value={(liveData.Water_Volume_Liters ?? 0.0).toFixed(2)} unit="L"
                   color="#5E5CE6" colorEnd="#4A48C9" glowColor="#5E5CE6"
                   icon={Droplets} dataKey="waterLevel" data={liveAnalytics}
                 />

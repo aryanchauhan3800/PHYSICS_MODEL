@@ -24,11 +24,22 @@ def solve_system(P, V_dw, phi, m_w, Q, valve_opening):
 
 def calculate_drum_level(V_dw, phi, P):
     """
-    Predict Water Level (L) in meters.
-    Water level: L = Vdw / A
+    Predict apparent water level (m) including swell effect.
+
+    Physics:
+      L_liquid  = V_dw / A_D          — level from liquid volume alone
+      L_apparent = L_liquid / (1 - φ)  — swell from steam bubbles in the
+                                         liquid column (void fraction φ)
+
+    The swell effect is critical: even a 5% void fraction raises the
+    apparent level by ~5%, which in a 16.5 cm water column is ~0.8 cm.
+    At φ=20% the level rises by ~4 cm — eating into the 7.5 cm steam space.
     """
-    L = V_dw / const.A_D
-    return L
+    L_liquid = V_dw / const.A_D
+    phi_safe = max(0.0, min(phi, 0.95))  # clamp to prevent division by zero
+    L_apparent = L_liquid / (1.0 - phi_safe)
+    # Clamp to drum height
+    return min(L_apparent, const.H_DRUM)
 
 def calculate_temperature(P):
     """

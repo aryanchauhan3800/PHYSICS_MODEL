@@ -2,15 +2,19 @@
 import { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 
-export default function BoilerSchematic() {
-  const [isHeating, setIsHeating] = useState(false);
+interface BoilerSchematicProps {
+  isHeating: boolean;
+  mode: string;
+  onToggleHeater: () => void;
+  onSetAuto: () => void;
+  isLoading?: boolean;
+}
 
+export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSetAuto, isLoading }: BoilerSchematicProps) {
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: '16px', gap: '0px' }}>
 
       {/* Heating toggle — Apple-grade pill */}
-
-
       <svg viewBox="0 -40 800 640" style={{ width: '100%', flex: '1 1 auto', minHeight: 0 }} preserveAspectRatio="xMidYMid meet">
         <defs>
           {/* ── Filters ── */}
@@ -441,7 +445,11 @@ export default function BoilerSchematic() {
 
       {/* Heating toggle — Apple-grade pill, below SVG */}
       <button
-        onClick={() => setIsHeating(!isHeating)}
+        onClick={() => {
+          if (mode === 'AUTO') onToggleHeater();
+          else onSetAuto();
+        }}
+        disabled={isLoading}
         style={{
           flexShrink: 0,
           display: 'flex',
@@ -466,8 +474,9 @@ export default function BoilerSchematic() {
           letterSpacing: '0.06em',
           textTransform: 'uppercase' as const,
           fontFamily: "'Inter', -apple-system, BlinkMacSystemFont, sans-serif",
-          cursor: 'pointer',
+          cursor: isLoading ? 'not-allowed' : 'pointer',
           transition: 'all 0.28s cubic-bezier(0.25, 0.1, 0.25, 1)',
+          opacity: isLoading ? 0.7 : 1,
         }}
       >
         <div style={{
@@ -492,7 +501,7 @@ export default function BoilerSchematic() {
             transition: 'all 0.3s',
           }} />
         </div>
-        {isHeating ? 'Heater Active' : 'Heater Standby'}
+        {isLoading ? 'Processing...' : (mode === 'AUTO' ? (isHeating ? 'Auto Active' : 'Auto Standby') : (isHeating ? 'Manual On' : 'Manual Off'))}
       </button>
     </div>
   );

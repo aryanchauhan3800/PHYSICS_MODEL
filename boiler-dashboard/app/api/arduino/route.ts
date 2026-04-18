@@ -19,13 +19,24 @@ let lastKnownState = {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const isPredict = searchParams.get('predict') === 'true';
-  const endpoint = isPredict ? 'predict' : 'data';
+
+  // Build the proxy endpoint URL with optional demand parameters
+  let endpoint = isPredict ? 'predict' : 'data';
+  if (isPredict) {
+    const minutes = searchParams.get('minutes');
+    const targetPressure = searchParams.get('target_pressure');
+    const params = new URLSearchParams();
+    if (minutes) params.set('minutes', minutes);
+    if (targetPressure) params.set('target_pressure', targetPressure);
+    const qs = params.toString();
+    if (qs) endpoint += `?${qs}`;
+  }
 
   try {
     const res = await fetch(`http://${ESP32_IP}/${endpoint}`, {
       method: "GET",
-      // Increased timeout to 5s to allow for physics solver compute time
-      signal: AbortSignal.timeout(5000), 
+      // Prediction needs more time than telemetry (physics solver)
+      signal: AbortSignal.timeout(isPredict ? 15000 : 5000), 
       cache: 'no-store', 
       headers: {
         'Cache-Control': 'no-cache, no-store, must-revalidate',
@@ -59,6 +70,7 @@ export async function GET(req: Request) {
 export async function POST(req: Request) {
   try {
     const body = await req.json();
+    console.log("🚀 [API Route] Forwarding POST body:", JSON.stringify(body));
     
     // Forward the control command to the local Python Proxy
     const res = await fetch(`http://${ESP32_IP}/control`, {

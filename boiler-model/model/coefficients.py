@@ -80,7 +80,16 @@ def calculate_vector_D(P, V_dw, phi, m_w, Q, valve_opening):
     D = np.zeros(4)
     
     # Inter-region steam transfer (m_i for dome, output from below)
-    transfer = phi * const.M_DC
+    # New mechanistic bubble rise velocity formula:
+    # mi = A_drum * phi * rho_s * v_rise
+    # v_rise = 1.41 * ( (sigma * g * (rho_w - rho_s)) / rho_w^2 )^0.25
+    g = 9.81
+    sigma = thermo.get_sigma(P)
+    rho_w = thermo.get_rho_w(P)
+    A_drum = np.pi / 4.0 * const.D_DRUM**2
+    
+    v_rise = 1.41 * ( (sigma * g * (rho_w - rho_s)) / (rho_w**2) )**0.25
+    transfer = A_drum * phi * rho_s * v_rise
     
     # D1: Liquid Mass Balance
     D[0] = m_w
