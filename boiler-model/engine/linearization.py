@@ -1,6 +1,6 @@
 import numpy as np
 from scipy.linalg import expm
-from model import matrix_form as model
+from core import matrix_form as model
 
 def get_state_derivatives(P, V_dw, phi, m_w, Q, valve_opening):
     """ Helper to get [dP/dt, dVdw/dt, dphi/dt] from the solver. """

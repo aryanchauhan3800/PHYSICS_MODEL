@@ -34,9 +34,9 @@ import numpy as np
 # Add parent directory to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-from inputs import constants as const
-from equations import thermo_relations as thermo
-from simulation.solver_logic import predict_timeline, compute_initial_state
+from config import constants as const
+from physics import thermo_relations as thermo
+from engine.solver_logic import predict_timeline, compute_initial_state
 from iapws import IAPWS97
 
 # ── Boiler Hardware Constants ──

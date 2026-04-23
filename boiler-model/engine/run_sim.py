@@ -7,9 +7,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.integrate import solve_ivp
-from model import matrix_form as model
-from inputs import constants as const
-from simulation.solver_logic import system_derivatives
+from core import matrix_form as model
+from config import constants as const
+from engine.solver_logic import system_derivatives
 
 def run_simulation(duration=500, dt=1.0):
     """
@@ -37,7 +37,7 @@ def run_simulation(duration=500, dt=1.0):
     # Inputs
     m_w = 10.0
     valve_opening = 1.0
-    from equations import thermo_relations as thermo
+    from physics import thermo_relations as thermo
     h_s = thermo.get_h_s(P0)
     h_feed = 4186.0 * const.T_FEED
     Q = m_s_target * h_s - m_w * h_feed
@@ -121,8 +121,8 @@ def plot_results(t, P, L, T, mg):
     axs[1, 1].grid(True)
     
     plt.tight_layout()
-    plt.savefig('outputs/simulation_results.png')
-    print("Simulation results saved to outputs/simulation_results.png")
+    plt.savefig('results/simulation_results.png')
+    print("Simulation results saved to results/simulation_results.png")
 
 if __name__ == "__main__":
     t, P, L, T, mg = run_simulation()

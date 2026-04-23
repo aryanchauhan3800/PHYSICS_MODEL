@@ -15,8 +15,6 @@ H_STEAM     = 0.075    # Steam space above water  (7.5 cm → 1.9 L)
 # ── Volumes (m³) ──
 V_T     = A_D * H_DRUM               # Total internal volume ≈ 0.00611 m³ (~6.1 L)
 V_WATER_INIT = A_D * H_WATER_MAX    # Water volume at float_high ≈ 0.00420 m³ (~4.2 L)
-V_R     = 0.003                       # Riser tubes (model parameter)
-V_DC    = 0.001                       # Downcomer tubes (model parameter)
 
 # ── Inlet / Outlet Pipes ──
 D_INLET  = 0.0127      # Water inlet diameter   (1.27 cm = ½ inch)
@@ -25,17 +23,23 @@ A_INLET  = math.pi / 4.0 * D_INLET**2   # Inlet area  ≈ 1.267e-4 m²
 A_OUTLET = math.pi / 4.0 * D_PIPE**2    # Outlet area ≈ 1.267e-4 m²
 
 # ── Metal Properties ──
-M_M     = 1.5           # Mass of boiler metal (kg) — steel vessel (measured)
+M_M     = 6.5           # Effective Mass of boiler metal & fittings (kg) - Calibrated to match observed heating rate
 C_M     = 480.0         # Specific heat capacity of steel (J/(kg·K))
 
 # ── Flow Parameters ──
-M_DC    = 0.5           # Circulation flow rate through the loop (kg/s)
+M_DC    = 0.5           # Natural circulation rate (kg/s) — used by test/simulation scripts
 
 # ── Steam Outlet Orifice Parameters ──
-C_D_VALVE    = 0.65     # Discharge coefficient
+C_D_VALVE    = 0.65     # Discharge coefficient (dimensionless)
 P_DOWNSTREAM = 1.013e5  # Downstream pressure (Pa) — 1 atm
 
 # ── Operational Parameters ──
-A_HEATER  = 0.01        # Heater surface area (m²) — assumed for 1kW immersion
+A_HEATER  = 0.01        # Heater surface area (m²) — measured for 1kW immersion element
+R_FOULING = 0.0         # Thermal resistance of scale buildup (m²·K/W)
 P_NOMINAL = 2.0e5       # Nominal operating pressure (2 bar)
 T_FEED    = 25.0        # Feed water temperature (°C)
+
+# ── Environmental & Heat Loss Parameters ──
+T_AMB     = 25.0        # Ambient temperature (°C)
+U_LOSS    = 6.0         # Overall heat loss coefficient (W/m²·K) - calibrated: housing reduces free convection
+A_VESSEL  = math.pi * D_DRUM * H_DRUM + 2.0 * A_D # Total exposed surface area of the drum

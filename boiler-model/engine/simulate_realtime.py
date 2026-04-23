@@ -8,7 +8,7 @@ import threading
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation.solver_logic import run_continuous
+from engine.solver_logic import run_continuous
 
 import json
 try:
@@ -189,8 +189,8 @@ def simulate_realtime(duration=300, dt=1.0):
     ax3.set_xlabel('Time (s)')
     
     plt.tight_layout()
-    plt.savefig('outputs/realtime_simulation.png')
-    print("Dashboard saved to outputs/realtime_simulation.png [Complete].")
+    plt.savefig('results/realtime_simulation.png')
+    print("Dashboard saved to results/realtime_simulation.png [Complete].")
 
 if __name__ == '__main__':
     simulate_realtime(duration=60)

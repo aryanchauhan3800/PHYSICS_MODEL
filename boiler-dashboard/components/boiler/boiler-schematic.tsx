@@ -38,50 +38,50 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
 
           {/* Tank – light steel with subtle cool sheen */}
           <linearGradient id="ag-tank" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%"   stopColor="#b8c4d0" />
-            <stop offset="12%"  stopColor="#cdd8e3" />
-            <stop offset="50%"  stopColor="#dae4ec" />
-            <stop offset="88%"  stopColor="#cdd8e3" />
+            <stop offset="0%" stopColor="#b8c4d0" />
+            <stop offset="12%" stopColor="#cdd8e3" />
+            <stop offset="50%" stopColor="#dae4ec" />
+            <stop offset="88%" stopColor="#cdd8e3" />
             <stop offset="100%" stopColor="#b8c4d0" />
           </linearGradient>
 
           {/* Glass sheen */}
           <linearGradient id="ag-glass" x1="0" y1="0" x2="1" y2="0.6">
-            <stop offset="0%"   stopColor="rgba(255,255,255,0.55)" />
-            <stop offset="30%"  stopColor="rgba(255,255,255,0.10)" />
+            <stop offset="0%" stopColor="rgba(255,255,255,0.55)" />
+            <stop offset="30%" stopColor="rgba(255,255,255,0.10)" />
             <stop offset="100%" stopColor="rgba(255,255,255,0.20)" />
           </linearGradient>
 
           {/* Water — vivid blue */}
           <linearGradient id="ag-water" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"   stopColor="#42a5f5" stopOpacity="0.95" />
-            <stop offset="35%"  stopColor="#1976d2" />
+            <stop offset="0%" stopColor="#42a5f5" stopOpacity="0.95" />
+            <stop offset="35%" stopColor="#1976d2" />
             <stop offset="100%" stopColor="#0d47a1" />
           </linearGradient>
 
           {/* Pipe — horizontal (3D cylinder, light steel) */}
           <linearGradient id="ag-pipe-h" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"   stopColor="#8a9aaa" />
-            <stop offset="22%"  stopColor="#b0bec5" />
-            <stop offset="46%"  stopColor="#cfd8dc" />
-            <stop offset="54%"  stopColor="#cfd8dc" />
-            <stop offset="78%"  stopColor="#b0bec5" />
+            <stop offset="0%" stopColor="#8a9aaa" />
+            <stop offset="22%" stopColor="#b0bec5" />
+            <stop offset="46%" stopColor="#cfd8dc" />
+            <stop offset="54%" stopColor="#cfd8dc" />
+            <stop offset="78%" stopColor="#b0bec5" />
             <stop offset="100%" stopColor="#78909c" />
           </linearGradient>
 
           {/* Pipe — vertical */}
           <linearGradient id="ag-pipe-v" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0%"   stopColor="#78909c" />
-            <stop offset="22%"  stopColor="#b0bec5" />
-            <stop offset="46%"  stopColor="#cfd8dc" />
-            <stop offset="54%"  stopColor="#cfd8dc" />
-            <stop offset="78%"  stopColor="#b0bec5" />
+            <stop offset="0%" stopColor="#78909c" />
+            <stop offset="22%" stopColor="#b0bec5" />
+            <stop offset="46%" stopColor="#cfd8dc" />
+            <stop offset="54%" stopColor="#cfd8dc" />
+            <stop offset="78%" stopColor="#b0bec5" />
             <stop offset="100%" stopColor="#8a9aaa" />
           </linearGradient>
 
           {/* Valve body */}
           <linearGradient id="ag-valve" x1="0" y1="0" x2="0" y2="1">
-            <stop offset="0%"   stopColor="#8fa8be" />
+            <stop offset="0%" stopColor="#8fa8be" />
             <stop offset="100%" stopColor="#607d8b" />
           </linearGradient>
 
@@ -123,7 +123,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
               <motion.g initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 1 }}>
                 {[
                   // Plume 1 (Left)
-                  { x: 310, y: 440, r: 3, dur: 1.8, delay: 0,   wx: 12 },
+                  { x: 310, y: 440, r: 3, dur: 1.8, delay: 0, wx: 12 },
                   { x: 315, y: 450, r: 4, dur: 2.1, delay: 0.4, wx: -8 },
                   { x: 305, y: 435, r: 2, dur: 1.5, delay: 0.8, wx: 10 },
                   { x: 312, y: 445, r: 5, dur: 1.9, delay: 1.2, wx: -12 },
@@ -151,8 +151,8 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
                     fill="rgba(255,255,255,0.25)"
                     stroke="rgba(255,255,255,0.9)"
                     strokeWidth="1.2"
-                    animate={{ 
-                      cx: [x, x + wx, x - wx, x + (wx/2), x],
+                    animate={{
+                      cx: [x, x + wx, x - wx, x + (wx / 2), x],
                       cy: [y, y - 40, y - 90, 290, 280],
                       opacity: [0, 0.8, 1, 0.8, 0],
                       scale: [0.2, 0.7, 1.2, 1.8, 2.5]
@@ -170,10 +170,10 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
               <motion.g initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 1.0 }}>
                 {/* Background steam shadow for depth and contrast */}
                 <motion.g filter="url(#ag-steam)" fill="#90a4ae" opacity="0.85">
-                  <motion.ellipse cx="400" cy="195" rx="125" ry="40" 
+                  <motion.ellipse cx="400" cy="195" rx="125" ry="40"
                     animate={{ rx: [125, 155, 110, 125], ry: [40, 60, 35, 40], opacity: [0.5, 0.9, 0.6, 0.5], x: [-20, 25, -15, -20] }}
                     transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }} />
-                  <motion.circle cx="320" cy="160" r="60" 
+                  <motion.circle cx="320" cy="160" r="60"
                     animate={{ x: [0, 55, -25, 0], y: [0, -35, 15, 0], scale: [1, 1.35, 0.9, 1] }}
                     transition={{ duration: 2.1, repeat: Infinity, ease: 'easeInOut' }} />
                   <motion.circle cx="480" cy="150" r="65"
@@ -186,22 +186,22 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
 
                 {/* Foreground bright steam */}
                 <motion.g filter="url(#ag-steam)" fill="#ffffff" opacity="1">
-                  <motion.ellipse cx="400" cy="200" rx="120" ry="36" 
+                  <motion.ellipse cx="400" cy="200" rx="120" ry="36"
                     animate={{ opacity: [0.7, 1, 0.8, 0.7], ry: [36, 60, 30, 36], rx: [120, 150, 110, 120], x: [-15, 20, -15] }}
                     transition={{ duration: 1.5, repeat: Infinity, ease: 'easeInOut' }} />
-                  <motion.circle cx="330" cy="165" r="55" fill="#e8f4fd" 
+                  <motion.circle cx="330" cy="165" r="55" fill="#e8f4fd"
                     animate={{ x: [0, 60, -30, 0], y: [0, -40, 15, 0], scale: [1, 1.45, 0.9, 1] }}
                     transition={{ duration: 1.7, repeat: Infinity, ease: 'easeInOut' }} />
                   <motion.circle cx="470" cy="150" r="60"
                     animate={{ x: [0, -55, 35, 0], y: [0, -45, 10, 0], scale: [1, 1.35, 0.85, 1] }}
                     transition={{ duration: 1.65, repeat: Infinity, ease: 'easeInOut' }} />
-                  <motion.circle cx="390" cy="140" r="55" fill="#f0f7ff" 
+                  <motion.circle cx="390" cy="140" r="55" fill="#f0f7ff"
                     animate={{ x: [-35, 50, -20, -35], y: [0, -55, 10, 0], scale: [0.9, 1.5, 0.8, 0.9] }}
                     transition={{ duration: 1.4, repeat: Infinity, ease: 'easeInOut' }} />
-                  <motion.circle cx="430" cy="130" r="50" fill="#ffffff" 
+                  <motion.circle cx="430" cy="130" r="50" fill="#ffffff"
                     animate={{ x: [35, -45, 20, 35], y: [10, -40, 5, 10], scale: [1, 1.5, 0.85, 1] }}
                     transition={{ duration: 1.3, repeat: Infinity, ease: 'easeInOut' }} />
-                  <motion.circle cx="360" cy="135" r="45" fill="#ffffff" 
+                  <motion.circle cx="360" cy="135" r="45" fill="#ffffff"
                     animate={{ x: [-45, 35, -20, -45], y: [15, -35, 5, 15], scale: [1, 1.45, 0.9, 1] }}
                     transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }} />
                 </motion.g>
@@ -267,7 +267,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
           <path d="M 60 0 L 260 0" stroke="url(#ag-pipe-h)" strokeWidth="22" />
           {/* Flanges */}
           <rect x="252" y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
-          <rect x="58"  y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
+          <rect x="58" y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
           {/* Flow indicator */}
           <path d="M 65 0 L 255 0" stroke="#1e88e5" strokeWidth="3" strokeDasharray="14 20" fill="none" opacity="0.35" filter="url(#ag-dot)">
             <animate attributeName="stroke-dashoffset" values="34;0" dur="1.1s" repeatCount="indefinite" />
@@ -275,7 +275,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
           {/* Gate valve */}
           <g transform="translate(112, 0)">
             <rect x="-16" y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
-            <rect x="9"   y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
+            <rect x="9" y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
             <polygon points="-10,-14 10,14 10,-14 -10,14" fill="url(#ag-valve)" stroke="#90a4ae" strokeWidth="1.2" strokeLinejoin="round" />
             <rect x="-13" y="-35" width="26" height="18" fill="#cdd8e3" stroke="#90a4ae" strokeWidth="0.8" rx="3" />
             <circle cx="0" cy="-26" r="2.5" fill="#1a8f3c" opacity="0.9" filter="url(#ag-dot)" />
@@ -363,7 +363,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
           <path d="M 0 0 L 0 -26" stroke="url(#ag-pipe-v)" strokeWidth="16" />
           <rect x="-11" y="-30" width="22" height="7" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
           <rect x="-17" y="-50" width="34" height="18" fill="#dae4ec" stroke="#90a4ae" strokeWidth="0.8" rx="3" />
-          <rect x="-9"  y="-47" width="18" height="11" fill="#edf2f7" rx="2" />
+          <rect x="-9" y="-47" width="18" height="11" fill="#edf2f7" rx="2" />
           <path d="M -6 -41 L -2 -41 L 0 -44 L 3 -38 L 6 -41" stroke="#1a8f3c" strokeWidth="1" fill="none" opacity="0.9" />
           <text x="-32" y="-58" fill="#546e7a" fontSize="11" fontWeight="700" letterSpacing="1.4" fontFamily="-apple-system, BlinkMacSystemFont, 'Inter', sans-serif">PRESSURE</text>
         </g>
@@ -384,7 +384,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
         <g transform="translate(540, 162)">
           <path d="M 0 0 L 175 0" stroke="#9eb2be" strokeWidth="26" />
           <path d="M 0 0 L 175 0" stroke="url(#ag-pipe-h)" strokeWidth="22" />
-          <rect x="-2"  y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
+          <rect x="-2" y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
           <rect x="168" y="-13" width="9" height="26" fill="#b0bec5" stroke="#90a4ae" strokeWidth="0.5" rx="1" />
           {/* Steam flow — only when heating */}
           {isHeating && (
@@ -400,7 +400,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
           {/* Valve */}
           <g transform="translate(68, 0)">
             <rect x="-16" y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
-            <rect x="9"   y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
+            <rect x="9" y="-13" width="7" height="26" fill="#90a4ae" rx="1" />
             <polygon points="-10,-14 10,14 10,-14 -10,14" fill="url(#ag-valve)" stroke="#90a4ae" strokeWidth="1.2" strokeLinejoin="round" />
             <rect x="-15" y="-38" width="30" height="21" fill="#dae4ec" stroke="#90a4ae" strokeWidth="0.8" rx="3" />
             <circle cx="0" cy="-27" r="4.5" fill="none" stroke="#78909c" strokeWidth="1.2" />
@@ -423,9 +423,9 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
         <g transform="translate(540, 430)">
           <rect x="0" y="-26" width="18" height="48" fill="#dae4ec" stroke="#90a4ae" strokeWidth="1.2" rx="3" />
           <path d="M 18 -14 L 38 -14" stroke={isHeating ? '#b96a00' : '#90a4ae'} strokeWidth="4" strokeLinecap="round" />
-          <path d="M 18 8 L 38 8"   stroke={isHeating ? '#b96a00' : '#90a4ae'} strokeWidth="4" strokeLinecap="round" />
+          <path d="M 18 8 L 38 8" stroke={isHeating ? '#b96a00' : '#90a4ae'} strokeWidth="4" strokeLinecap="round" />
           <circle cx="40" cy="-14" r="3" fill={isHeating ? '#b96a00' : '#90a4ae'} />
-          <circle cx="40" cy="8"   r="3" fill={isHeating ? '#b96a00' : '#90a4ae'} />
+          <circle cx="40" cy="8" r="3" fill={isHeating ? '#b96a00' : '#90a4ae'} />
           <text x="50" y="2" fill="#546e7a" fontSize="11" fontWeight="700" letterSpacing="1.4" fontFamily="-apple-system, BlinkMacSystemFont, 'Inter', sans-serif">PWR</text>
         </g>
 
@@ -437,7 +437,7 @@ export default function BoilerSchematic({ isHeating, mode, onToggleHeater, onSet
             <text x="48" y="18" textAnchor="middle"
               fill="#546e7a"
               fontFamily="-apple-system, BlinkMacSystemFont, 'Inter', sans-serif"
-              fontSize="12" fontWeight="700" letterSpacing="1.4">2.0 LITER</text>
+              fontSize="12" fontWeight="700" letterSpacing="1.4">4.0 LITER</text>
           </g>
         </g>
 

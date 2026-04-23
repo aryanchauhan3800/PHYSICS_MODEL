@@ -1,4 +1,4 @@
-from simulation.solver_logic import run_continuous
+from engine.solver_logic import run_continuous
 import sys
 import os
 

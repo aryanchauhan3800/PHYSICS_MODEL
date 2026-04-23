@@ -4,9 +4,9 @@ import os
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from inputs import constants as const
-from simulation.solver_logic import predict_forward
-from simulation.linearization import predict_linear_jump
+from config import constants as const
+from engine.solver_logic import predict_forward
+from engine.linearization import predict_linear_jump
 
 def run_test():
     print("=== Testing Linearized Matrix Exponentiation against Non-Linear Model ===")
@@ -21,7 +21,7 @@ def run_test():
     # Define inputs (u_op) that maintain steady state
     m_w = 10.0
     valve_opening = 1.0
-    from equations import thermo_relations as thermo
+    from physics import thermo_relations as thermo
     h_s_nom = thermo.get_h_s(P_op)
     h_feed = 4186.0 * const.T_FEED
     Q = 10.0 * h_s_nom - 10.0 * h_feed

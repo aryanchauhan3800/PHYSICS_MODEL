@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import sys
 import os
@@ -5,9 +9,9 @@ import os
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model import matrix_form as model
-from inputs import constants as const
-from equations import thermo_relations as thermo
+from core import matrix_form as model
+from config import constants as const
+from physics import thermo_relations as thermo
 
 def verify_steady_state():
     print("--- Boiler Model Physical Verification ---")

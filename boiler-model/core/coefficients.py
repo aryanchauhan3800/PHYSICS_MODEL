@@ -1,11 +1,12 @@
 import numpy as np
-from equations import thermo_relations as thermo
-from equations import void_fraction as void
-from equations import water_mass
-from equations import steam_below
-from equations import steam_above
-from equations import energy
-from inputs import constants as const
+from physics import thermo_relations as thermo
+from physics import void_fraction as void
+from physics import water_mass
+from physics import steam_below
+from physics import steam_above
+from physics import energy
+from config import constants as const
+from iapws import IAPWS97
 
 def calculate_matrix_C(P, V_dw, phi):
     """
@@ -43,11 +44,10 @@ def calculate_matrix_C(P, V_dw, phi):
     # Row 2: Steam Mass Balance (below water level)
     C[1, :] = steam_below.get_steam_below_coefficients(V_dw, phi, rho_s, drho_s_dP)
     
-    # Row 3: Total Energy Balance (including metal thermal mass)
+    # Row 3: Global Energy Balance (whole drum, internal energy)
     C[2, :] = energy.get_energy_coefficients(
-        V_dw, phi, rho_w, rho_s, h_w, h_s, 
-        drho_w_dP, drho_s_dP, dh_w_dP, dh_s_dP,
-        M_M=const.M_M, C_M=const.C_M, dTsat_dP=dT_s_dP
+        V_dw, phi, rho_w, rho_s, u_w, u_s, 
+        d_rho_u_w_dP, d_rho_u_s_dP, const.V_T
     )
     
     # Row 4: Steam Mass Balance (above water level)
@@ -55,25 +55,42 @@ def calculate_matrix_C(P, V_dw, phi):
     
     return C
 
-def calculate_vector_D(P, V_dw, phi, m_w, Q, valve_opening):
+def calculate_vector_D(P, V_dw, phi, m_w, Q_fluid, valve_opening):
     """
     Calculate the 4x1 vector D for the system CX = D.
     Inputs:
     - m_w: inlet water flow (kg/s)
-    - Q: heat input (W)
+    - Q_fluid: heat transfer from metal to water (W)
     - valve_opening: scale for steam exit flow
     """
-    # Calculate steam exit flow m_s using orifice equation
-    # m_s = C_d * A * sqrt(2 * rho_s * (P - P_downstream))
+    # ── Compressible Steam Flow (Orifice Equation with Choking) ──
     A_orifice = np.pi / 4.0 * const.D_PIPE**2
     rho_s = thermo.get_rho_s(P)
-    delta_P = max(P - const.P_DOWNSTREAM, 0.0)  # Prevent negative sqrt
-    m_s = const.C_D_VALVE * A_orifice * valve_opening * np.sqrt(2.0 * rho_s * delta_P)
     
-    # Feed water enthalpy (assuming constant T_feed for now)
-    # Actually, we should use a proper function for subcooled water if needed,
-    # but for simplicity, use h_w at T_feed.
-    h_feed = 4186.0 * (const.T_FEED) # Approx J/kg
+    # Isentropic expansion factor for steam
+    k = 1.3
+    P_up = max(P, const.P_DOWNSTREAM + 1.0) # Ensure slightly positive delta
+    r = const.P_DOWNSTREAM / P_up
+    
+    # Critical pressure ratio
+    r_c = (2.0 / (k + 1.0)) ** (k / (k - 1.0))
+    
+    if r <= r_c:
+        # Choked Flow
+        r = r_c
+        
+    # Compressible mass flow equation
+    term = (k / (k - 1.0)) * (r**(2.0/k) - r**((k+1.0)/k))
+    term = max(term, 0.0) # Safety clamp
+    
+    m_s = const.C_D_VALVE * A_orifice * valve_opening * np.sqrt(2.0 * P_up * rho_s * term)
+    
+    # Feed water enthalpy — IAPWS-97 subcooled liquid at T_feed and system pressure
+    try:
+        _fw = IAPWS97(T=const.T_FEED + 273.15, P=max(P, 101325.0) / 1e6)
+        h_feed = _fw.h * 1000.0  # kJ/kg → J/kg
+    except Exception:
+        h_feed = 4186.0 * const.T_FEED  # Fallback: Cp approximation
     
     h_s = thermo.get_h_s(P)
     
@@ -98,7 +115,11 @@ def calculate_vector_D(P, V_dw, phi, m_w, Q, valve_opening):
     D[1] = - transfer
     
     # D3: Energy Balance
-    D[2] = Q + m_w * h_feed - m_s * h_s
+    # Calculate environmental heat loss
+    T_water = thermo.get_T_sat(P) - 273.15
+    Q_loss = const.U_LOSS * const.A_VESSEL * max(T_water - const.T_AMB, 0.0)
+    
+    D[2] = Q_fluid - Q_loss + m_w * h_feed - m_s * h_s
     
     # D4: Steam Mass Balance (above water level)
     # Includes m_s outflow here natively.

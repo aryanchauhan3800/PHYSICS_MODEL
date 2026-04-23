@@ -5,7 +5,7 @@ import os
 # Ensure model packages can be imported
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from simulation.solver_logic import run_continuous, predict_forward
+from engine.solver_logic import run_continuous, predict_forward
 
 def rolling_prediction_sim(duration=20, dt=1.0, horizon=300.0):
     print("==================================================")

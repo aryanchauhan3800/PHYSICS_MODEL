@@ -1,5 +1,5 @@
 import numpy as np
-from equations import thermo_relations as thermo
+from physics import thermo_relations as thermo
 
 def get_void_fraction(phi, P):
     """

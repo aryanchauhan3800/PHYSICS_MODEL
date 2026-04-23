@@ -1,3 +1,7 @@
+import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import numpy as np
 import sys
 import os
@@ -5,11 +9,11 @@ import os
 # Add parent directory to path to allow imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from model import matrix_form as model
-from inputs import constants as const
-from simulation.solver_logic import predict_forward
+from core import matrix_form as model
+from config import constants as const
+from engine.solver_logic import predict_forward
 
-from equations import thermo_relations as thermo
+from physics import thermo_relations as thermo
 from utils.hardware import get_live_snapshot
 
 
@@ -52,7 +56,7 @@ def verify_prediction_consistency():
         dP_dt, dVdw_dt, dphi_dt, m_g = X
         
         # Track m_s exit explicitly for step 2 verification
-        from equations import thermo_relations as thermo
+        from physics import thermo_relations as thermo
         A_orifice = np.pi / 4.0 * const.D_PIPE**2
         rho_s = thermo.get_rho_s(P_curr)
         delta_P = max(P_curr - const.P_DOWNSTREAM, 0.0)

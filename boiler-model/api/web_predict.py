@@ -1,10 +1,14 @@
 import sys
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import sys
 import json
 import numpy as np
 from scipy.integrate import solve_ivp
-from simulation.solver_logic import system_derivatives, calculate_dynamic_temperature
-from model import matrix_form as model
-from inputs import constants as const
+from engine.solver_logic import system_derivatives, calculate_dynamic_temperature
+from core import matrix_form as model
+from config import constants as const
 
 def generate_timeseries(P_start, Vdw_start, phi_start, m_w, Q, valve, T_start=None, horizon=300.0, step=5.0):
     """

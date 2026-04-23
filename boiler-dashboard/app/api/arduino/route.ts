@@ -19,15 +19,18 @@ let lastKnownState = {
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
   const isPredict = searchParams.get('predict') === 'true';
+  const isExport = searchParams.get('export') === 'true';
 
-  // Build the proxy endpoint URL with optional demand parameters
-  let endpoint = isPredict ? 'predict' : 'data';
+  // Build the proxy endpoint URL
+  let endpoint = isExport ? 'export' : (isPredict ? 'predict' : 'data');
   if (isPredict) {
     const minutes = searchParams.get('minutes');
     const targetPressure = searchParams.get('target_pressure');
+    const rFouling = searchParams.get('r_fouling');
     const params = new URLSearchParams();
     if (minutes) params.set('minutes', minutes);
     if (targetPressure) params.set('target_pressure', targetPressure);
+    if (rFouling) params.set('r_fouling', rFouling);
     const qs = params.toString();
     if (qs) endpoint += `?${qs}`;
   }
@@ -45,6 +48,17 @@ export async function GET(req: Request) {
     });
 
     if (res.ok) {
+      if (isExport) {
+        // Return the binary CSV file
+        const blob = await res.blob();
+        return new Response(blob, {
+          headers: {
+            'Content-Type': 'text/csv',
+            'Content-Disposition': res.headers.get('Content-Disposition') || 'attachment; filename="session.csv"'
+          }
+        });
+      }
+
       const data = await res.json();
       
       // If it's a telemetry request (not predict), update lastKnownState
@@ -63,6 +77,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ ...lastKnownState, connected: false }, { status: 502 });
     }
   } catch (error) {
+    console.error("GET /api/arduino error:", error);
     return NextResponse.json({ ...lastKnownState, connected: false }, { status: 504 });
   }
 }
