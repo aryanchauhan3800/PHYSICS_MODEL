@@ -39,16 +39,17 @@ def calculate_matrix_C(P, V_dw, phi):
     C = np.zeros((4, 4))
     
     # Row 1: Liquid Mass Balance
-    C[0, :] = water_mass.get_water_mass_coefficients(V_dw, phi, rho_w, drho_w_dP)
+    C[0, :] = water_mass.get_water_mass_coefficients(V_dw, alpha_r, da_dphi, da_dP, rho_w, drho_w_dP)
     
     # Row 2: Steam Mass Balance (below water level)
-    C[1, :] = steam_below.get_steam_below_coefficients(V_dw, phi, rho_s, drho_s_dP)
+    C[1, :] = steam_below.get_steam_below_coefficients(V_dw, alpha_r, da_dphi, da_dP, rho_s, drho_s_dP)
     
     # Row 3: Global Energy Balance (whole drum, internal energy)
     C[2, :] = energy.get_energy_coefficients(
-        V_dw, phi, rho_w, rho_s, u_w, u_s, 
+        V_dw, alpha_r, da_dphi, da_dP, rho_w, rho_s, u_w, u_s, 
         d_rho_u_w_dP, d_rho_u_s_dP, const.V_T
     )
+
     
     # Row 4: Steam Mass Balance (above water level)
     C[3, :] = steam_above.get_steam_above_coefficients(const.V_T, V_dw, rho_s, drho_s_dP)

@@ -21,45 +21,37 @@ V_dw * phi * (d(rho_g)/dP) * dP/dt
 = m_g - transfer
 """
 
-def get_steam_below_coefficients(V_dw, phi, rho_g, drho_g_dp):
+def get_steam_below_coefficients(V_dw, alpha, da_dphi, da_dP, rho_g, drho_g_dp):
     """
     Returns the coefficients for the C matrix corresponding to the
-    steam mass conservation equation (below water level) and the RHS value.
+    steam mass conservation equation (below water level).
 
     The state vector formulation is assumed to be: X = [dP/dt, dV_dw/dt, dphi/dt, m_g]^T
 
-    Accumulation = d(rho_g * V_dw * phi) / dt
-                 = V_dw * phi * drho_g_dp * dP/dt + rho_g * phi * dV_dw/dt + rho_g * V_dw * dphi/dt
-    
+    M_steam_below = rho_g * V_dw * alpha
+    dM_steam_below/dt = (V_dw * alpha * drho_g_dp + rho_g * V_dw * da_dP) * dP/dt
+                      + (rho_g * alpha) * dV_dw/dt
+                      + (rho_g * V_dw * da_dphi) * dphi/dt
+
     Accumulation = Generation (m_g) - Transfer (m_t)
-    Accumulation - Generation = - Transfer
     
     Rearranging for CX = D:
-    (V_dw * phi * drho_g_dp)*dP/dt + (rho_g * phi)*dV_dw/dt + (rho_g * V_dw)*dphi/dt + (-1.0)*m_g = -transfer
-
-    Args:
-        V_dw (float): Volume of water/steam mixture below water level.
-        phi (float): Void fraction in the below water level volume.
-        rho_g (float): Saturated steam density.
-        drho_g_dp (float): Partial derivative of steam density w.r.t pressure.
-
-    Returns:
-        tuple: (list of C coefficients [C11, C12, C13, C14], D coefficient)
-            - C_coeffs: List of 4 floats for the C matrix row.
+    C21*dP/dt + C22*dV_dw/dt + C23*dphi/dt - 1.0*m_g = -transfer
     """
     
-    # C1: Coefficient for dP/dt
-    C1 = V_dw * phi * drho_g_dp
+    # C21: Coefficient for dP/dt
+    C21 = V_dw * alpha * drho_g_dp + rho_g * V_dw * da_dP
     
-    # C2: Coefficient for dV_dw/dt
-    C2 = rho_g * phi
+    # C22: Coefficient for dV_dw/dt
+    C22 = rho_g * alpha
     
-    # C3: Coefficient for dphi/dt
-    C3 = rho_g * V_dw
+    # C23: Coefficient for dphi/dt
+    C23 = rho_g * V_dw * da_dphi
     
-    # C4: Coefficient for m_g (generation)
-    C4 = -1.0
+    # C24: Coefficient for m_g (generation)
+    C24 = -1.0
 
-    C_coeffs = [C1, C2, C3, C4]
+    C_coeffs = [C21, C22, C23, C24]
     
     return C_coeffs
+

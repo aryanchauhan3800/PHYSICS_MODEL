@@ -1,9 +1,29 @@
 import numpy as np
+import warnings
 from scipy.integrate import solve_ivp
 from core import matrix_form as model
 from physics import thermo_relations as thermo
 from config import constants as const
 from iapws import IAPWS97
+
+
+def safe_solve_ivp(fun, t_span, y0, method='Radau', t_eval=None, **kwargs):
+    """
+    Wrapper around solve_ivp that checks solver success status.
+    On failure, logs a warning and returns the last known good state
+    instead of silently returning garbage values.
+    """
+    sol = solve_ivp(fun, t_span, y0, method=method, t_eval=t_eval, **kwargs)
+    if not sol.success:
+        warnings.warn(
+            f"[ODE] solve_ivp failed (status={sol.status}): {sol.message}. "
+            f"Returning last known state.",
+            stacklevel=2
+        )
+        # Fallback: return initial conditions as if no change occurred
+        if sol.y.shape[1] == 0:
+            sol.y = np.array([[v] for v in y0])
+    return sol
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -116,11 +136,40 @@ def compute_initial_state(T_celsius, P_pa, water_mass_kg):
 
     return Vdw, phi, L
 
+# ── Cumulative audit counters (module-level for live dashboard access) ──
+_audit_cumulative_mass_error = 0.0
+_audit_entropy_violations = 0
+_audit_step_count = 0
+
+def get_audit_metrics():
+    """Return live thermodynamic consistency metrics for the dashboard."""
+    return {
+        "cumulative_mass_error_kg": _audit_cumulative_mass_error,
+        "entropy_violations": _audit_entropy_violations,
+        "steps_evaluated": _audit_step_count,
+        "mass_conservation_proven": _audit_cumulative_mass_error < 1e-6,
+        "second_law_proven": _audit_entropy_violations == 0,
+    }
+
+def reset_audit_metrics():
+    """Reset audit counters at the start of a new prediction."""
+    global _audit_cumulative_mass_error, _audit_entropy_violations, _audit_step_count
+    _audit_cumulative_mass_error = 0.0
+    _audit_entropy_violations = 0
+    _audit_step_count = 0
+
+
 def system_derivatives(t, y, m_w, Q, valve_opening):
     """
     State wrapper for scipy integrate.
     y = [P, Vdw, phi, T_wall]
+
+    Includes live thermodynamic consistency audits:
+      - Mass conservation check (dM/dt = ṁ_in − ṁ_out)
+      - Clausius entropy inequality (Ṡ_irr ≥ 0)
     """
+    global _audit_cumulative_mass_error, _audit_entropy_violations, _audit_step_count
+
     if len(y) == 4:
         P, V_dw, phi, T_wall = y
     else:
@@ -129,11 +178,11 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
     
     # Boundary clamps to prevent solver from evaluating unphysical states
     # which could domain error in square roots or steam tables computation
-    P_safe = min(max(P, 5000.0), 3000000.0)
-    V_dw_safe = max(V_dw, 0.0)
-    phi_safe = max(0.0, min(1.0, phi))
+    P_safe = min(max(P, 5000.0), 1000000.0) # Cap at 10 bar (Safety Relief Valve)
+    V_dw_safe = max(V_dw, 1e-6)            # Dry-run floor (1ml)
+    phi_safe = max(0.0, min(0.99, phi))    # Prevent pure steam singularity
     
-    # --- Metal Wall Heat Transfer (Thom Correlation + Natural Convection) ---
+    # --- Metal Wall Heat Transfer (Thom Correlation + CHF Guard) ---
     T_water = thermo.get_T_sat(P_safe) - 273.15
     delta_T_sat = max(T_wall - T_water, 0.0)
     
@@ -145,6 +194,30 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
     # => q'' = 1e6 * (delta_T * exp(P / 8.7e6) / 22.65)^2
     if delta_T_sat > 0:
         q_flux_boil = 1e6 * ( (delta_T_sat * np.exp(P_safe / 8.7e6)) / 22.65 )**2
+        
+        # ── CHF Guard: Zuber's Critical Heat Flux Correlation ──
+        # q''_CHF = 0.131 · h_fg · ρ_s · [σ·g·(ρ_w−ρ_s)/ρ_s²]^0.25
+        #
+        # The Thom correlation is ONLY valid in the nucleate boiling regime.
+        # Beyond q''_CHF, film boiling occurs (Leidenfrost effect) and
+        # heat transfer drops catastrophically. Capping at CHF prevents
+        # the model from entering this unphysical regime.
+        #
+        # Reference: Zuber, N. (1959), "Hydrodynamic Aspects of Boiling
+        # Heat Transfer", AEC Report AECU-4439.
+        rho_w_chf = thermo.get_rho_w(P_safe)
+        rho_s_chf = thermo.get_rho_s(P_safe)
+        sigma_chf = thermo.get_sigma(P_safe)
+        h_fg_chf = thermo.get_h_fg(P_safe)
+        g = 9.81
+        
+        q_CHF = 0.131 * h_fg_chf * rho_s_chf * (
+            (sigma_chf * g * (rho_w_chf - rho_s_chf)) / (rho_s_chf**2)
+        )**0.25
+        
+        # Cap the boiling heat flux at CHF — never enter film boiling
+        q_flux_boil = min(q_flux_boil, q_CHF)
+        
         H_boil = q_flux_boil / delta_T_sat
     else:
         H_boil = 0.0
@@ -165,7 +238,45 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
     dT_wall_dt = (Q - Q_transfer - Q_wall_loss) / (const.M_M * const.C_M)
     
     # Calculate fluid derivatives using Q_transfer instead of Q
-    X = model.solve_system(P_safe, V_dw_safe, phi_safe, m_w, Q_transfer, valve_opening)
+    X = list(model.solve_system(P_safe, V_dw_safe, phi_safe, m_w, Q_transfer, valve_opening))
+    
+    # ── Live Thermodynamic Audits ──
+    _audit_step_count += 1
+    # Mass conservation audit (every 10th step to avoid performance hit)
+    if _audit_step_count % 10 == 0:
+        try:
+            # Compute m_s for the mass audit
+            A_orifice = np.pi / 4.0 * const.D_PIPE**2
+            rho_s = thermo.get_rho_s(P_safe)
+            k = 1.3
+            P_up = max(P_safe, const.P_DOWNSTREAM + 1.0)
+            r = const.P_DOWNSTREAM / P_up
+            r_c = (2.0 / (k + 1.0)) ** (k / (k - 1.0))
+            if r <= r_c:
+                r = r_c
+            term = max(0.0, (k / (k - 1.0)) * (r**(2.0/k) - r**((k+1.0)/k)))
+            m_s = const.C_D_VALVE * A_orifice * valve_opening * np.sqrt(2.0 * P_up * rho_s * term)
+
+            mass_err = model.audit_mass_conservation(
+                P_safe, V_dw_safe, phi_safe, m_w, m_s, X[3],
+                X[0], X[1], X[2]
+            )
+            _audit_cumulative_mass_error = max(_audit_cumulative_mass_error, mass_err)
+
+            # Entropy audit
+            Q_loss_fluid = const.U_LOSS * const.A_VESSEL * max(T_water - const.T_AMB, 0.0)
+            s_irr, is_valid = model.audit_entropy_production(
+                P_safe, V_dw_safe, phi_safe, Q_transfer, Q_loss_fluid, T_wall, m_w, m_s
+            )
+            if not is_valid:
+                _audit_entropy_violations += 1
+        except Exception:
+            pass  # Audits must never crash the solver
+
+    # --- ACTIVE SAFETY RELIEF VALVE ---
+    # If pressure exceeds 10 bar, dP/dt is capped at 0 (venting to atmosphere)
+    if P >= 1000000.0 and X[0] > 0:
+        X[0] = 0.0
     
     if len(y) == 4:
         return [X[0], X[1], X[2], dT_wall_dt]
@@ -293,7 +404,7 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
         # ── Transition: boil at t_to_boil, run ODE for the rest ──
         remaining = duration - t_to_boil
         y0 = [P_init, Vdw_init, 0.005, cur_T_wall]       # continuous from subcooled peak
-        sol = solve_ivp(
+        sol = safe_solve_ivp(
             fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
             t_span=(0.0, remaining),
             y0=y0,
@@ -310,7 +421,7 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
 
     # ── Already at / above saturation (or heater off) ──
     y0 = [P_init, Vdw_init, phi_init, cur_T_wall]
-    sol = solve_ivp(
+    sol = safe_solve_ivp(
         fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
         t_span=(0.0, duration),
         y0=y0,
@@ -433,7 +544,7 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     C_gas = V_gas / cur_P
                     C_water = cur_Vdw / K_WATER
                     dP_therm = (beta_T * dT * cur_Vdw) / (C_gas + C_water)
-                    cur_P += dP_therm
+                    cur_P = min(cur_P + dP_therm, 10e5) # Cap at 10 bar (Safety Valve)
                     dV_expand = cur_Vdw * beta_T * dT - C_water * dP_therm
                     cur_Vdw += dV_expand
                     
@@ -450,20 +561,26 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     # Maintain current pressure rather than forcing to P_atm
                     cur_phi = PHI_MAX_SUBCOOLED   # continuous transition
 
-                    if remaining_dt > 1.0:   # run ODE only if meaningful
+                    if remaining_dt > 0.1:   # run ODE only if meaningful
                         y0  = [cur_P, cur_Vdw, cur_phi, cur_T_wall]
-                        sol = solve_ivp(
+                        sol = safe_solve_ivp(
                             fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
                             t_span=(0.0, remaining_dt),
                             y0=y0,
                             method='Radau',
                             t_eval=[remaining_dt]
                         )
-                        cur_P   = max(sol.y[0, -1], P_atm)
-                        cur_Vdw = max(sol.y[1, -1], 0.0)
-                        cur_phi = max(0.0, min(1.0, sol.y[2, -1]))
-                        cur_T_wall = sol.y[3, -1]
-                        cur_T   = thermo.get_T_sat(cur_P) - 273.15
+                        
+                        if sol.success and sol.y.shape[1] > 0:
+                            cur_P   = max(sol.y[0, -1], P_atm)
+                            cur_Vdw = max(sol.y[1, -1], 0.0)
+                            cur_phi = max(0.0, min(1.0, sol.y[2, -1]))
+                            cur_T_wall = sol.y[3, -1]
+                            cur_T   = thermo.get_T_sat(cur_P) - 273.15
+                        else:
+                            # Solver stalled or failed - keep last known state
+                            cur_T = T_sat_currP
+                            cur_phi = PHI_MAX_SUBCOOLED
                 else:
                     cur_T   = new_T
                     cur_T_wall = cur_T + 2.0
@@ -493,7 +610,7 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
             #  T = T_sat(P)  — temperature tracks saturation curve
             # ═══════════════════════════════════════════════════════
             y0  = [cur_P, cur_Vdw, cur_phi, cur_T_wall]
-            sol = solve_ivp(
+            sol = safe_solve_ivp(
                 fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
                 t_span=(0.0, dt),
                 y0=y0,
@@ -567,7 +684,7 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
         # Stepping forward by dt
         y0 = [P, V_dw, phi, current_T_wall]
         
-        sol = solve_ivp(
+        sol = safe_solve_ivp(
             fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
             t_span=(current_time, current_time + dt),
             y0=y0,

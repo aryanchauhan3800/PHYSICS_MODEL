@@ -14,7 +14,7 @@ Differentiating U_total via product rule:
 dU/dt = C1 * dP/dt + C2 * dV_dw/dt + C3 * dphi/dt
 """
 
-def get_energy_coefficients(V_dw, phi, rho_w, rho_s, u_w, u_s, 
+def get_energy_coefficients(V_dw, alpha, da_dphi, da_dP, rho_w, rho_s, u_w, u_s, 
                             d_rho_u_w_dP, d_rho_u_s_dP, V_T):
     """
     Returns the coefficients for the C matrix corresponding to the
@@ -22,36 +22,31 @@ def get_energy_coefficients(V_dw, phi, rho_w, rho_s, u_w, u_s,
 
     The state vector formulation is assumed to be: X = [dP/dt, dV_dw/dt, dphi/dt, m_g]^T
 
-    Args:
-        V_dw (float): Volume of water/steam mixture below water level.
-        phi (float): Void fraction in the below water level volume.
-        rho_w (float): Saturated liquid density.
-        rho_s (float): Saturated steam density.
-        u_w (float): Saturated liquid internal energy.
-        u_s (float): Saturated steam internal energy.
-        d_rho_u_w_dP (float): Partial derivative of (rho_w * u_w) w.r.t pressure.
-        d_rho_u_s_dP (float): Partial derivative of (rho_s * u_s) w.r.t pressure.
-        V_T (float): Total internal volume of the boiler (drum).
-
-    Returns:
-        tuple: (list of C coefficients [C1, C2, C3, C4])
-            - C_coeffs: List of 4 floats for the C matrix row.
+    U_total = V_dw * [rho_w*u_w + alpha*(rho_s*u_s - rho_w*u_w)] + (V_T - V_dw)*(rho_s*u_s)
+    
+    dU_total/dt = C31*dP/dt + C32*dV_dw/dt + C33*dphi/dt
     """
+    e_w = rho_w * u_w
+    e_s = rho_s * u_s
+    de_w_dP = d_rho_u_w_dP
+    de_s_dP = d_rho_u_s_dP
     
-    # C1: Coefficient for dP/dt
-    # Includes thermal inertia of water, sub-surface steam, and the entire steam dome
-    C1 = (V_dw * (1.0 - phi) * d_rho_u_w_dP) + ((V_T - V_dw * (1.0 - phi)) * d_rho_u_s_dP)
+    # C31: Coefficient for dP/dt
+    # accumulation = dU/dP * dP/dt
+    C31 = V_dw * (de_w_dP + alpha * (de_s_dP - de_w_dP) + (e_s - e_w) * da_dP) + (V_T - V_dw) * de_s_dP
     
-    # C2: Coefficient for dV_dw/dt
-    C2 = (1.0 - phi) * (rho_w * u_w - rho_s * u_s)
+    # C32: Coefficient for dV_dw/dt
+    # accumulation = dU/dV_dw * dV_dw/dt
+    C32 = (1.0 - alpha) * (e_w - e_s)
     
-    # C3: Coefficient for dphi/dt
-    C3 = -V_dw * (rho_w * u_w - rho_s * u_s)
+    # C33: Coefficient for dphi/dt
+    # accumulation = dU/dphi * dphi/dt
+    C33 = V_dw * (e_s - e_w) * da_dphi
     
-    # C4: Coefficient for m_g (generation)
-    # The generation of steam is purely internal mass transfer; it does not change the global U
-    C4 = 0.0
+    # C34: Coefficient for m_g (generation)
+    C34 = 0.0
 
-    C_coeffs = [C1, C2, C3, C4]
+    C_coeffs = [C31, C32, C33, C34]
     
     return C_coeffs
+

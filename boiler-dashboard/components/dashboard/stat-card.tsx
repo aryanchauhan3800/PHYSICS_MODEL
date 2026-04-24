@@ -3,9 +3,25 @@ import { STAT_CARDS, ANALYTICS_DATA } from "../../lib/mock-data";
 import { AnimatedValue } from "../ui/animated-value";
 import { Sparkline } from "../ui/sparkline";
 
-export function StatCard({ card, index }: { card: typeof STAT_CARDS[number] & { sparkData?: number[] }; index: number }) {
+interface StatCardData {
+  id: string;
+  label: string;
+  value: string;
+  unit: string;
+  trend?: number;
+  bar: number;
+  sub: string;
+  icon: React.ComponentType<any>;
+  accent: string;
+  accentAlpha: string;
+  description: string;
+  sparkData?: number[];
+}
+
+export function StatCard({ card, index }: { card: StatCardData; index: number }) {
   const Icon = card.icon;
-  const up = card.trend > 0;
+  const trend = card.trend ?? 0;
+  const up = trend > 0;
   
   // Generate sparkline data from the card value
   const sparkData = card.sparkData || (card.id === 'pressure' 
@@ -65,7 +81,7 @@ export function StatCard({ card, index }: { card: typeof STAT_CARDS[number] & { 
           {up
             ? <ArrowUpRight style={{ width: '10px', height: '10px' }} strokeWidth={2.5} />
             : <ArrowDownRight style={{ width: '10px', height: '10px' }} strokeWidth={2.5} />}
-          {Math.abs(card.trend)}%
+          {Math.abs(trend)}%
         </div>
       </div>
 

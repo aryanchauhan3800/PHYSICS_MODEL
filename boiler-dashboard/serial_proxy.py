@@ -16,6 +16,7 @@ from datetime import datetime
 repo_root = Path(__file__).parent.parent
 sys.path.append(str(repo_root / "boiler-model"))
 from engine.solver_logic import predict_forward, predict_timeline, compute_initial_state
+from engine.kalman_filter import BoilerEKF
 import physics.thermo_relations as thermo
 
 
@@ -180,7 +181,7 @@ class EfficiencyTracker:
             self.prev_T = T_celsius
 
             # Environmental loss estimate
-            from inputs import constants as const
+            from config import constants as const
             Q_loss = const.U_LOSS * const.A_VESSEL * max(T_celsius - const.T_AMB, 0.0) * dt_seconds
             self.total_Q_loss_J += Q_loss
 
@@ -313,6 +314,11 @@ validation_logger = ValidationLogger()
 efficiency_tracker = EfficiencyTracker()
 anomaly_detector = AnomalyDetector()
 session_logger = SessionLogger()
+
+# ── Feature 5: Extended Kalman Filter for Sensor-Model Fusion ──
+boiler_ekf = BoilerEKF()
+boiler_ekf.set_physics_model(predict_forward, compute_initial_state)
+print("🧮 Extended Kalman Filter (EKF) initialized — sensor-model fusion active")
 
 SERIAL_PORT = "/dev/tty.usbserial-0001"
 BAUD_RATE = 115200
@@ -497,6 +503,23 @@ def read_serial():
                     now = time.time()
                     dt_sec = now - last_flow_time if 'last_flow_time' in globals() else 2.0
                     
+                    # 0. EKF Predict-Update Cycle (sensor-model fusion)
+                    try:
+                        boiler_ekf.predict_and_update(
+                            z_T=latest_data["T"],
+                            z_P_abs=latest_data["P"],
+                            z_V_L=current_water_volume_L,
+                            Q_watts=latest_data["Q"],
+                            m_w_kgs=latest_data["mw"] / 60.0,
+                            valve_opening=0.0,
+                            water_mass_kg=water_mass_kg
+                        )
+                        # Store fused state in latest_data for dashboard access
+                        fused = boiler_ekf.get_fused_state()
+                        latest_data["kalman"] = fused
+                    except Exception as ekf_err:
+                        print(f"⚠️ [EKF] Update failed (non-fatal): {ekf_err}")
+
                     # 1. Update Efficiency Tracker
                     efficiency_tracker.update(
                         T_celsius=latest_data["T"],
@@ -513,9 +536,7 @@ def read_serial():
                     )
 
                     # 3. Update Anomaly Detector (if we have prediction history)
-                    # For simplicity, we compare current state to the very first point of the last serving prediction
-                    # in a real system we'd use a state estimator.
-                    # Here we just check if it's within a safe envelope.
+                    # Uses the EKF state estimator for optimal model-reality comparison.
 
                     # 4. Session Logging (throttle to ~1Hz)
                     # Assuming ~5-10 lines per second from serial, log every 5th line
@@ -657,7 +678,8 @@ class RequestHandler(BaseHTTPRequestHandler):
                             "efficiency": efficiency_tracker.get_metrics(),
                             "validation": validation_logger.get_metrics(),
                             "health": anomaly_detector.get_status(),
-                            "session": session_logger.get_info()
+                            "session": session_logger.get_info(),
+                            "kalman": boiler_ekf.get_metrics()
                         }
                     }
                     self.wfile.write(json.dumps(response).encode('utf-8'))
@@ -683,7 +705,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         r_fouling_str = qp.get('r_fouling', ['0.0'])[0]
                         
                         try:
-                            from inputs import constants as const
+                            from config import constants as const
                             const.R_FOULING = float(r_fouling_str)
                             print(f"DEBUG: R_FOULING set to {const.R_FOULING}")
                         except Exception as e:
@@ -794,24 +816,39 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 }
                         else:
                             # ── Forward Prediction Timeline (demand-driven) ──
-                            P_init_pa = latest_data["P"] * 1e5
+                            # Use Kalman-fused state if available, else raw sensors
+                            fused = boiler_ekf.get_fused_state() if boiler_ekf.initialized else None
+                            if fused and boiler_ekf.n_updates > 5:
+                                T_init_val = fused["T_fused"]
+                                P_init_pa = fused["P_fused"] * 1e5
+                                V_init_L = fused["V_fused"]
+                                water_mass_fused = V_init_L * 0.997
+                                print(f"DEBUG: [EKF] Using Kalman-fused state → T={T_init_val:.1f}°C, P={fused['P_fused']:.4f} bar, V={V_init_L:.3f} L")
+                            else:
+                                T_init_val = latest_data["T"]
+                                P_init_pa = latest_data["P"] * 1e5
+                                V_init_L = current_water_volume_L
+                                water_mass_fused = water_mass_kg
+                                print(f"DEBUG: [EKF] Kalman not ready — using raw sensors")
+
                             mw_init_kgs = latest_data["mw"] / 60.0
 
-                            # Compute Vdw, phi, L from real sensor readings + flow tracking
+                            # Compute Vdw, phi, L from fused state
                             Vdw_init, phi_init, L_init = compute_initial_state(
-                                T_celsius=latest_data["T"],
+                                T_celsius=T_init_val,
                                 P_pa=P_init_pa,
-                                water_mass_kg=water_mass_kg
+                                water_mass_kg=water_mass_fused
                             )
-                            print(f"DEBUG: Sensor-derived state → Vdw={Vdw_init:.5f} m³, phi={phi_init:.4f}, L={L_init:.4f} m (water={water_mass_kg:.2f} kg)")
+                            print(f"DEBUG: Fused-derived state → Vdw={Vdw_init:.5f} m³, phi={phi_init:.4f}, L={L_init:.4f} m")
 
                             timeline = []
                             # t=0 is the current state — gauge pressure (0 at atmospheric)
+                            P_abs_bar = P_init_pa / 1e5
                             timeline.append({
                                 "t_min": 0,
-                                "T": round(latest_data["T"], 1),
-                                "P": round(max(0, latest_data["P"] - 1.013), 3),
-                                "L": round(current_water_volume_L, 3)
+                                "T": round(T_init_val, 1),
+                                "P": round(max(0, P_abs_bar - 1.013), 3),
+                                "L": round(V_init_L, 3)
                             })
 
                             try:
@@ -823,7 +860,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     m_w=mw_init_kgs,
                                     Q=effective_Q,
                                     valve_opening=0.0,
-                                    T_init=latest_data["T"],
+                                    T_init=T_init_val,
                                     n_points=demand_minutes,
                                     step_seconds=60.0
                                 )

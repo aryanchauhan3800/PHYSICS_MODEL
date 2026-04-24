@@ -4,11 +4,12 @@ import { HeatGraph3D } from "./heat-graph-3d";
 interface LiveData {
   mw: number;
   Q: number;
-  Kv: number;
+  Kv?: number;
   T: number;
   P: number;
   pump: number;
   connected: boolean;
+  [key: string]: any;
 }
 
 export function HeatGraphPanel({ liveData }: { liveData: LiveData }) {
@@ -48,7 +49,7 @@ export function HeatGraphPanel({ liveData }: { liveData: LiveData }) {
         const nx = x / GRID, ny = y / GRID;
         const drumTop = (pScale * 0.8 + 0.2) * Math.exp(-((nx - 0.5) ** 2 + (ny - 0.2) ** 2) / 0.08);
         const steamZone = (pScale * 0.4 + 0.1) * Math.exp(-((nx - 0.4) ** 2 + (ny - 0.15) ** 2) / 0.05);
-        const valveDrop = -(liveData.Kv * 0.4) * Math.exp(-((nx - 0.75) ** 2 + (ny - 0.2) ** 2) / 0.02);
+        const valveDrop = -((liveData.Kv ?? 0) * 0.4) * Math.exp(-((nx - 0.75) ** 2 + (ny - 0.2) ** 2) / 0.02);
         const baseP = (pScale * 0.2) + drumTop + steamZone + valveDrop + (Math.random() * 0.01 - 0.005);
         row.push(Math.max(0.01, Math.min(5.0, baseP)));
       }

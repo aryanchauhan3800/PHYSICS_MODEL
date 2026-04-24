@@ -67,6 +67,24 @@ interface LiveData {
       filename: string;
       rows: number;
     };
+    kalman?: {
+      enabled: boolean;
+      n_updates: number;
+      n_resets: number;
+      fused_T: number;
+      fused_P: number;
+      fused_V: number;
+      innovation_T: number;
+      innovation_P: number;
+      innovation_V: number;
+      gain_T: number;
+      gain_P: number;
+      gain_V: number;
+      covariance_trace: number;
+      uncertainty_T: number;
+      uncertainty_P: number;
+      uncertainty_V: number;
+    };
   };
 }
 
@@ -413,6 +431,25 @@ export default function Dashboard() {
       accent: (liveData.digital_twin?.health.health_score ?? 100) > 80 ? '#34C759' : '#FF9F0A',
       accentAlpha: (liveData.digital_twin?.health.health_score ?? 100) > 80 ? 'rgba(52,199,89,0.1)' : 'rgba(255,159,10,0.1)',
       sparkData: liveAnalytics.map(d => liveData.digital_twin?.health.health_score ?? 100)
+    },
+    {
+      id: 'kalman_fusion',
+      label: 'Sensor Fusion (EKF)',
+      value: liveData.digital_twin?.kalman?.enabled ? 
+        (liveData.digital_twin.kalman.n_updates ?? 0).toString() : '—',
+      unit: liveData.digital_twin?.kalman?.enabled ? 'cycles' : '',
+      sub: liveData.digital_twin?.kalman?.enabled
+        ? `K_T=${(liveData.digital_twin.kalman.gain_T ?? 0).toFixed(2)} K_P=${(liveData.digital_twin.kalman.gain_P ?? 0).toFixed(2)} | σ_T=±${(liveData.digital_twin.kalman.uncertainty_T ?? 0).toFixed(2)}°C`
+        : 'Initializing...',
+      description: liveData.digital_twin?.kalman?.enabled
+        ? `Innovation: ΔT=${(liveData.digital_twin.kalman.innovation_T ?? 0).toFixed(2)}°C ΔP=${(liveData.digital_twin.kalman.innovation_P ?? 0).toFixed(3)} bar | Resets: ${liveData.digital_twin.kalman.n_resets ?? 0}`
+        : 'Extended Kalman Filter warming up',
+      bar: Math.min(100, Math.max(0, (liveData.digital_twin?.kalman?.n_updates ?? 0) > 0 ? 
+        Math.max(0, 100 - (Math.abs(liveData.digital_twin?.kalman?.innovation_T ?? 0) / 5.0) * 100) : 0)),
+      icon: Eye,
+      accent: (liveData.digital_twin?.kalman?.n_resets ?? 0) === 0 ? '#0A84FF' : '#FF9F0A',
+      accentAlpha: (liveData.digital_twin?.kalman?.n_resets ?? 0) === 0 ? 'rgba(10,132,255,0.1)' : 'rgba(255,159,10,0.1)',
+      sparkData: liveAnalytics.map(d => liveData.digital_twin?.kalman?.gain_T ?? 0)
     }
   ];
 
@@ -729,7 +766,7 @@ export default function Dashboard() {
               </div>
               <div
                 className="stat-grid"
-                style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '12px', marginBottom: '24px' }}
+                style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '12px', marginBottom: '24px' }}
               >
                 {CURRENT_STAT_CARDS.slice(4).map((card, i) => (
                   <StatCard key={card.id} card={card} index={i + 4} />
@@ -801,7 +838,7 @@ export default function Dashboard() {
                       {/* Verification Tag Button */}
                       <button 
                         onClick={handleTagPrediction}
-                        disabled={!hasForecast || (verificationTag && !verificationTag.verified)}
+                        disabled={!hasForecast || !!(verificationTag && !verificationTag.verified)}
                         style={{
                           marginLeft: '20px',
                           display: 'flex', alignItems: 'center', gap: '8px',
