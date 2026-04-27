@@ -1,0 +1,2 @@
+timestamp,T_actual,P_actual_gauge,T_predicted,P_predicted,Q_watts,flow_lpm,water_L,eta_instant,health_score,anomaly_flag
+2026-04-24T15:03:22.296466,0.0,0,,,0.0,0.0,0,0.0,100,0

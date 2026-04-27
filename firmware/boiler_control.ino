@@ -33,7 +33,6 @@ volatile int flowPulse = 0;
 float flowRate = 0;
 float temperature = 0;
 float pressure = 0;
-
 bool pumpState = false;
 bool valveOpenState = false;
 
@@ -137,11 +136,22 @@ void readSensors() {
     temperature = raw_temp;
   }
 
-  // Pressure (ADS1115 - 0.5V to 4.5V span)
+  // Pressure Sensor via ADS1115
+  // Sensor: 1.2 MPa (12 bar) gauge, 0.5V at 0 bar to 4.5V at 12 bar
   int16_t adc = ads.readADC_SingleEnded(0);
   float voltage = adc * 0.1875 / 1000.0;
-  pressure = (voltage - 0.5) * (10.0 / 4.0);
+  
+  // Apply the physical zero-offset calibration (0.664V instead of 0.5V) 
+  // so that it reads 0.0 at atmospheric pressure.
+  const float PRESSURE_ZERO_V = 0.664; 
+  const float PRESSURE_SPAN_V = 4.0;
+  const float PRESSURE_FULL_SCALE_MPA = 1.2;
+  
+  pressure = (voltage - PRESSURE_ZERO_V) *
+             (PRESSURE_FULL_SCALE_MPA / PRESSURE_SPAN_V);
+             
   if (pressure < 0) pressure = 0;
+  if (pressure > PRESSURE_FULL_SCALE_MPA) pressure = PRESSURE_FULL_SCALE_MPA;
 
   // Float Switches — Normally-Closed (NC) wiring with INPUT_PULLUP
   // No water → float hangs down → switch CLOSED → pin grounded → LOW
@@ -291,6 +301,7 @@ void setup() {
   server.begin();
 
   Wire.begin(21, 22);
+  ads.setGain(GAIN_TWOTHIRDS);  // +/-6.144V range, 0.1875 mV/bit
   if (!ads.begin()) {
     Serial.println("ADS1115 FAIL");
     while(1);
@@ -324,7 +335,7 @@ void loop() {
   if (millis() - lastLog >= 1000) {
     Serial.println("------");
     Serial.print("Temp: ");      Serial.println(temperature);
-    Serial.print("Pressure: ");  Serial.println(pressure);
+    Serial.print("Pressure: ");  Serial.println(pressure, 4); // Send in MPa
     Serial.print("Flow: ");      Serial.println(flowRate);
     Serial.print("Pump: ");      Serial.println(pumpState ? "1" : "0");
     Serial.print("Heater: ");    Serial.println(digitalRead(SSR_PIN) == HIGH ? "ON" : "OFF");

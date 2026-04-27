@@ -23,7 +23,7 @@ A_INLET  = math.pi / 4.0 * D_INLET**2   # Inlet area  ≈ 1.267e-4 m²
 A_OUTLET = math.pi / 4.0 * D_PIPE**2    # Outlet area ≈ 1.267e-4 m²
 
 # ── Metal Properties ──
-M_M     = 6.5           # Effective Mass of boiler metal & fittings (kg) - Calibrated to match observed heating rate
+M_M     = 8.5           # Effective Mass of boiler metal & fittings (kg) - Calibrated: includes element body, flanges, pipes
 C_M     = 480.0         # Specific heat capacity of steel (J/(kg·K))
 
 # ── Flow Parameters ──
@@ -41,5 +41,10 @@ T_FEED    = 25.0        # Feed water temperature (°C)
 
 # ── Environmental & Heat Loss Parameters ──
 T_AMB     = 25.0        # Ambient temperature (°C)
-U_LOSS    = 6.0         # Overall heat loss coefficient (W/m²·K) - calibrated: housing reduces free convection
+U_LOSS    = 12.0        # Overall heat loss coefficient (W/m²·K) - calibrated: natural convection + radiation at high T
 A_VESSEL  = math.pi * D_DRUM * H_DRUM + 2.0 * A_D # Total exposed surface area of the drum
+
+# ── Parasitic Steam Leak (fitting/PRV seat leakage) ──
+# Even when valve is "closed", small leaks exist through fittings and PRV seat.
+# This prevents unphysical sealed-vessel pressure runaway.
+K_LEAK    = 3e-5        # Leak conductance (kg/s per bar of gauge pressure) - calibrated from 10-min pressure bias

@@ -114,3 +114,18 @@ def get_d_alpha_d_P(phi, P):
 
     da_h_dP = f_x * d_ratio_dP + (rho_w / delta_rho) * df_dx * dx_dP
     return da_h_dP / C_0
+
+
+def get_exit_void_fraction(phi, P):
+    """
+    Calculate the void fraction at the surface (exit) given mass quality phi.
+    
+    alpha_exit = (phi * rho_w) / (phi * rho_w + (1 - phi) * rho_s)
+    """
+    rho_w = thermo.get_rho_w(P)
+    rho_s = thermo.get_rho_s(P)
+    
+    denom = phi * rho_w + (1.0 - phi) * rho_s
+    if denom < 1e-10:
+        return 0.0
+    return (phi * rho_w) / denom

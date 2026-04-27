@@ -195,9 +195,13 @@ void readSensors() {
   }
   float avgADC = (float)adcSum / (float)PRESSURE_OVERSAMPLE;
   float sensorVoltage = avgADC * 0.0001875;  // ADS1115 TWOTHIRDS gain: 0.1875 mV/bit
-  float rawPressure = (sensorVoltage - 0.5) * (12.0 / 4.0); // 12 bar over 4V span (0.5V–4.5V)
+  const float PRESSURE_ZERO_V = 0.5;
+  const float PRESSURE_SPAN_V = 4.0;
+  const float PRESSURE_FULL_SCALE_MPA = 1.2; // 1.2 MPa = 12 bar gauge
+  float rawPressure = (sensorVoltage - PRESSURE_ZERO_V) *
+                      (PRESSURE_FULL_SCALE_MPA / PRESSURE_SPAN_V);
   if (rawPressure < 0) rawPressure = 0;
-  if (rawPressure > 12.0) rawPressure = 12.0; // Clamp to sensor max
+  if (rawPressure > 1.2) rawPressure = 1.2; // Clamp to sensor max
 
   // EMA for pressure
   if (!ema_initialized) {

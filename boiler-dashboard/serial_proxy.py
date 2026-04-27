@@ -18,6 +18,12 @@ sys.path.append(str(repo_root / "boiler-model"))
 from engine.solver_logic import predict_forward, predict_timeline, compute_initial_state
 from engine.kalman_filter import BoilerEKF
 import physics.thermo_relations as thermo
+from config import constants as const
+
+# --- Calibration Offsets (from session log analysis) ---
+TEMP_CALIBRATION_OFFSET = 0.541
+THERMAL_RESISTANCE_FACTOR = 0.022
+PRESSURE_CALIBRATION_OFFSET = -0.0547
 
 
 # ── Sensor Smoothing (Median + Outlier Rejection) ──────────────────────
@@ -25,19 +31,20 @@ class SensorSmoother:
     """
     Rolling median filter with outlier rejection for incoming serial data.
     This is the SECOND defense layer (after the ESP32's onboard EMA filter).
-    
+
     Strategy:
       1. Maintain a sliding window of the last `window` readings.
       2. Reject readings that deviate > `sigma_thresh` standard deviations
          from the current median (spike rejection).
       3. Return the median of the window as the smoothed value.
     """
-    def __init__(self, window=5, sigma_thresh=3.0):
+    def __init__(self, window=5, sigma_thresh=3.0, min_sigma=0.5):
         self.window = window
         self.sigma_thresh = sigma_thresh
+        self.min_sigma = min_sigma
         self.buffer = deque(maxlen=window)
 
-    def update(self, raw_value):
+    def update(self, raw_value, sensor_name="Unknown"):
         """Feed a new raw reading.  Returns the smoothed (median) value."""
         if len(self.buffer) >= 3:
             # Outlier rejection: check if new value is wildly off
@@ -45,18 +52,24 @@ class SensorSmoother:
             median = sorted_buf[len(sorted_buf) // 2]
             # Use MAD (Median Absolute Deviation) for robust σ estimate
             mad = sorted(abs(v - median) for v in sorted_buf)[len(sorted_buf) // 2]
-            sigma_est = mad * 1.4826  # MAD → σ conversion for normal distributions
-            if sigma_est > 0 and abs(raw_value - median) > self.sigma_thresh * sigma_est:
+            sigma_est = max(mad * 1.4826, self.min_sigma) # Added floor to prevent locking
+
+            # Reject only if it's both a statistical outlier AND exceeds a minimum absolute delta
+            # This prevents "locking" when the sensor is very stable.
+            abs_delta = abs(raw_value - median)
+            if abs_delta > self.sigma_thresh * sigma_est and abs_delta > 1.5:
                 # Spike detected — ignore this reading, return current median
+                print(f"⚠️ [Smoother] {sensor_name} spike rejected: {raw_value:.2f} (median: {median:.2f}, delta: {abs_delta:.2f}, thresh: {self.sigma_thresh * sigma_est:.2f})")
                 return median
         self.buffer.append(raw_value)
         sorted_buf = sorted(self.buffer)
         return sorted_buf[len(sorted_buf) // 2]
 
-# Create per-sensor smoothers
-smooth_temp     = SensorSmoother(window=5, sigma_thresh=3.0)
-smooth_pressure = SensorSmoother(window=5, sigma_thresh=3.0)
-smooth_flow     = SensorSmoother(window=3, sigma_thresh=2.5)  # Flow is spikier, tighter window
+# Create per-sensor smoothers with tailored noise floors
+# min_sigma prevents the filter from "locking" during periods of high stability
+smooth_temp     = SensorSmoother(window=5, sigma_thresh=3.0, min_sigma=0.5)  # 0.5°C floor
+smooth_pressure = SensorSmoother(window=5, sigma_thresh=4.0, min_sigma=0.02) # 0.02 bar floor
+smooth_flow     = SensorSmoother(window=3, sigma_thresh=2.5, min_sigma=0.1)  # 0.1 L/min floor
 
 
 # ── Feature 1: Model Validation Engine ──────────────────────────────────
@@ -87,11 +100,13 @@ class ValidationLogger:
                     "pred_P": pt["P"]
                 })
 
-    def record_actual(self, T, P):
+    def record_actual(self, T, P_abs):
         """Store an actual sensor reading with timestamp."""
         now = time.time()
         with self.lock:
-            self.actuals.append({"ts": now, "T": T, "P": P})
+            # Store P as Gauge pressure to match predictions
+            P_gauge = max(0, P_abs - 1.013)
+            self.actuals.append({"ts": now, "T": T, "P": P_gauge})
             # Match predictions that have matured (their target_ts has passed)
             to_remove = []
             for i, pred in enumerate(self.predictions):
@@ -280,10 +295,12 @@ class SessionLogger:
             writer = csv.writer(f)
             writer.writerow([
                 "timestamp", "T_actual", "P_actual_gauge", "T_predicted", "P_predicted",
-                "Q_watts", "flow_lpm", "water_L", "eta_instant", "health_score", "anomaly_flag"
+                "Q_watts", "flow_lpm", "water_L", "eta_instant", "health_score", "anomaly_flag",
+                "prediction_horizon_s", "prediction_target_timestamp", "L_predicted"
             ])
 
-    def log(self, T_act, P_gauge, T_pred, P_pred, Q, flow, water_L, eta, health, anomaly):
+    def log(self, T_act, P_gauge, T_pred, P_pred, Q, flow, water_L, eta, health, anomaly,
+            prediction_horizon_s=None, prediction_target_timestamp=None, L_pred=None):
         with self.lock:
             try:
                 with open(self.filepath, 'a', newline='') as f:
@@ -295,7 +312,10 @@ class SessionLogger:
                         round(P_pred, 4) if P_pred is not None else "",
                         round(Q, 1), round(flow, 3), round(water_L, 3),
                         round(eta, 1), health,
-                        1 if anomaly else 0
+                        1 if anomaly else 0,
+                        round(prediction_horizon_s, 1) if prediction_horizon_s is not None else "",
+                        prediction_target_timestamp or "",
+                        round(L_pred, 3) if L_pred is not None else ""
                     ])
                     self.row_count += 1
             except Exception as e:
@@ -341,17 +361,20 @@ is_connected = False
 command_queue = queue.Queue()
 
 # ── Water Volume & Level Tracking from Arduino ──
+INITIAL_WATER_VOLUME_L = const.V_WATER_INIT * 1000.0
+
 # Cumulative water mass in the boiler (kg)
-water_mass_kg = 4.5
+water_mass_kg = INITIAL_WATER_VOLUME_L * thermo.get_rho_w_subcooled(1.013e5, const.T_FEED) / 1000.0
 last_flow_time = time.time()
 
-# Explicit Volume Tracking 
+# Explicit Volume Tracking
 # V_new_L = V_old_L + (Flow_in_Lpm - Flow_out_Lpm) * dt_min
-current_water_volume_L = 4.5  # 4.5 Liters initial volume
+current_water_volume_L = INITIAL_WATER_VOLUME_L
 
 # Heater command intent tracking
 # When user clicks "Start Heater", we set this True immediately
 heater_cmd_pending = False
+SHORT_FORECAST_SECONDS = 60.0
 
 # ── Predictive Autopilot State ──
 autopilot_state = {
@@ -360,6 +383,92 @@ autopilot_state = {
     "status": "idle",        # idle | heating | coasting | stabilizing
     "forecast_p_5min": 0.0
 }
+
+
+def sync_water_from_float_state():
+    """
+    Use the float switch as an absolute level reference.
+
+    Flow integration drifts over time. When float_high is active, the boiler is
+    at the measured high-water mark, so reset volume and mass to that known
+    geometry instead of carrying accumulated flow error forward.
+    """
+    global current_water_volume_L, water_mass_kg
+
+    if latest_data.get("float_high", 0):
+        cur_P_pa = latest_data.get("P", 1.013) * 1e5
+        cur_T = latest_data.get("T", const.T_FEED)
+        rho = thermo.get_rho_w_subcooled(cur_P_pa, cur_T)
+        current_water_volume_L = INITIAL_WATER_VOLUME_L
+        water_mass_kg = INITIAL_WATER_VOLUME_L * rho / 1000.0
+        latest_data["Water_Volume_Liters"] = round(current_water_volume_L, 3)
+
+
+def get_model_start_state():
+    """Build a consistent model initial state from EKF when ready, else raw sensors."""
+    fused = boiler_ekf.get_fused_state() if boiler_ekf.initialized else None
+    if fused and boiler_ekf.n_updates > 5:
+        T_init = fused["T_fused"]
+        P_init_pa = fused["P_fused"] * 1e5
+        V_init_L = fused["V_fused"]
+        rho_w = thermo.get_rho_w_subcooled(P_init_pa, T_init)
+        model_water_mass_kg = V_init_L * (rho_w / 1000.0)
+    else:
+        T_init = latest_data["T"]
+        P_init_pa = latest_data["P"] * 1e5
+        V_init_L = current_water_volume_L
+        model_water_mass_kg = water_mass_kg
+
+    return T_init, P_init_pa, V_init_L, model_water_mass_kg
+
+
+def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
+    """
+    Forecast the near future on every log tick.
+
+    These values are written into the session CSV so exported logs contain
+    actual prediction-vs-future-actual evidence, not blank prediction columns.
+    """
+    try:
+        T_init, P_init_pa, _, model_water_mass_kg = get_model_start_state()
+        Vdw_init, phi_init, _ = compute_initial_state(
+            T_celsius=T_init,
+            P_pa=P_init_pa,
+            water_mass_kg=model_water_mass_kg
+        )
+
+        effective_Q = latest_data["Q"]
+        if effective_Q == 0 and heater_cmd_pending:
+            effective_Q = 1000.0
+
+        P_pred, Vdw_pred, _, _, T_pred, _ = predict_forward(
+            P_init=P_init_pa,
+            Vdw_init=Vdw_init,
+            phi_init=phi_init,
+            m_w=latest_data.get("mw", 0.0) / 60.0,
+            Q=effective_Q,
+            valve_opening=1.0 if latest_data.get("valve") == "OPEN" else 0.0,
+            T_init=T_init,
+            duration=float(horizon_s)
+        )
+
+        target_ts = datetime.fromtimestamp(time.time() + horizon_s).isoformat()
+        return {
+            "T": float(T_pred),
+            "P": max(0.0, float(P_pred) / 1e5 - 1.013),
+            "L": max(0.0, float(Vdw_pred) * 1000.0),
+            "horizon_s": float(horizon_s),
+            "target_ts": target_ts,
+        }
+    except Exception as e:
+        print(f"⚠️ [ShortForecast] Failed: {e}")
+        return {
+            "T": None,
+            "P": None,
+            "L": None,
+            "horizon_s": float(horizon_s),
+            "target_ts": datetime.fromtimestamp(time.time() + horizon_s).isoformat(),
+        }
 
 def read_serial():
     global is_connected
@@ -386,11 +495,11 @@ def read_serial():
                         pass
 
                     # Read incoming telemetry (non-blocking-ish with small timeout)
-                    ser.timeout = 0.1 
+                    ser.timeout = 0.1
                     line = ser.readline().decode('utf-8', errors='ignore').strip()
                     if not line:
                         continue
-                    
+
                     # IP Auto-Detection from Arduino log
                     if "http://" in line and "/data" in line:
                         try:
@@ -402,7 +511,7 @@ def read_serial():
                             pass
 
                     if "Temp:" in line:
-                        try: 
+                        try:
                             # Handle both "Temp: 760" and "Temp:760"
                             raw_val = float(line.split(":")[1].strip())
                             # Calibration: Most hobbyist sensors (TMP36) send millivolts
@@ -410,69 +519,119 @@ def read_serial():
                             if raw_val > 300: # Heuristic for raw mV vs Celsius
                                 raw_val = (raw_val - 500.0) / 10.0
                             # Layer 2: Median + outlier rejection
-                            latest_data["T"] = smooth_temp.update(raw_val)
+                            smoothed = smooth_temp.update(raw_val, "Temp")
+                            base_t = smoothed + TEMP_CALIBRATION_OFFSET
+                            latest_data["T"] = base_t + THERMAL_RESISTANCE_FACTOR * max(0.0, base_t - 25.0)
+                            print(f"🌡️ TEMP DEBUG → Raw: {raw_val:.2f}°C | Smoothed: {smoothed:.2f}°C | Calibrated: {latest_data['T']:.2f}°C | Heater Q: {latest_data['Q']}W | Ready: {latest_data.get('ready', '?')}")
                         except: pass
                     elif "Pressure:" in line:
                         try:
-                            # Convert Gauge to Absolute Pressure for the frontend
-                            p_val = float(line.split(":")[1].strip())
+                            # ESP32 sends gauge pressure in MPa from the 1.2 MPa sensor.
+                            p_val_mpa = float(line.split(":")[1].strip())
+                            p_val = p_val_mpa * 10.0 # Convert MPa to bar
                             # Layer 2: Median + outlier rejection (on gauge value)
-                            p_smoothed = smooth_pressure.update(p_val)
-                            latest_data["P"] = p_smoothed + 1.013
+                            p_smoothed = smooth_pressure.update(p_val, "Pressure")
+                            latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
                             print(f"🔍 PRESSURE DEBUG → Raw: {p_val:.4f} | Smoothed: {p_smoothed:.4f} bar | Abs: {latest_data['P']:.4f} bar")
                         except:
                             pass
                     elif "P_ADC:" in line:
                         try:
                             adc_raw = int(line.split(":")[1].strip())
-                            print(f"🔍 PRESSURE DEBUG → ADC counts: {adc_raw} | GPIO voltage: {adc_raw * (3.3/4095.0):.4f} V")
+                            adc_voltage = adc_raw * 0.0001875
+                            sensor_voltage = adc_voltage * 1.5
+                            pressure_bar = max(0.0, min(12.0, (sensor_voltage - 0.664) * 3.0))
+                            p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
+                            print(f"🔍 PRESSURE DEBUG → ADS1115 counts: {adc_raw} | ADS V: {adc_voltage:.4f} | Sensor V: {sensor_voltage:.4f} | Calc: {pressure_bar:.3f} bar gauge")
                         except:
                             pass
                     elif "P_Volts:" in line:
                         try:
+                            ads_v = float(line.split(":")[1].strip())
+                            sensor_v = ads_v * 1.5
+                            pressure_bar = max(0.0, min(12.0, (sensor_v - 0.664) * 3.0))
+                            p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
+                            print(f"🔍 PRESSURE DEBUG → ADS voltage: {ads_v:.4f} V | Sensor voltage: {sensor_v:.4f} V | Calc: {pressure_bar:.3f} bar gauge")
+                        except:
+                            pass
+                    elif "P_SensorVolts:" in line:
+                        try:
                             sensor_v = float(line.split(":")[1].strip())
-                            print(f"🔍 PRESSURE DEBUG → Sensor voltage (after divider): {sensor_v:.4f} V | Expected range: 0.5V (0 bar) – 4.5V (12 bar)")
+                            pressure_bar = max(0.0, min(12.0, (sensor_v - 0.664) * 3.0))
+                            p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
+                            print(f"🔍 PRESSURE DEBUG → Sensor voltage: {sensor_v:.4f} V | Calc: {pressure_bar:.3f} bar gauge | Abs: {latest_data['P']:.4f} bar")
+                        except:
+                            pass
+                    elif "P_RawBar:" in line:
+                        try:
+                            pressure_bar = max(0.0, min(12.0, float(line.split(":")[1].strip())))
+                            p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
+                            print(f"🔍 PRESSURE DEBUG → RawBar: {pressure_bar:.3f} | Smoothed: {p_smoothed:.3f} bar gauge | Abs: {latest_data['P']:.4f} bar")
                         except:
                             pass
                     elif "Flow:" in line:
-                        try: 
+                        try:
                             # Flow in L/min from Arduino flow meter
                             raw_flow = float(line.split(":")[1].strip())
                             # Layer 2: Median + outlier rejection
-                            flow_lpm = smooth_flow.update(raw_flow)
+                            flow_lpm = smooth_flow.update(raw_flow, "Flow")
                             latest_data["mw"] = flow_lpm
 
                             # ── Live Water Tracking in Liters ──
                             global water_mass_kg, current_water_volume_L, last_flow_time
                             now = time.time()
                             dt_sec = now - last_flow_time
-                            
+
                             if dt_sec < 10:  # Guard against stale timestamps
                                 dt_min = dt_sec / 60.0
-                                
+
                                 # 1. Water IN (from Arduino L/min)
-                                flow_in_L = max(0, flow_lpm) * dt_min
-                                if flow_lpm > 0:
-                                    water_mass_kg += flow_lpm * dt_min * 0.997
-                                
-                                # 2. Steam OUT (if Boiler is ON and actively boiling)
-                                flow_out_L = 0.0
+                                # Apply a small deadband to prevent noise-induced accumulation
+                                flow_lpm_clean = flow_lpm if flow_lpm >= 0.05 else 0.0
+                                flow_in_L = flow_lpm_clean * dt_min
+
+                                # Use actual density at current temperature for mass tracking
                                 cur_P_pa = latest_data.get("P", 1.013) * 1e5
-                                T_sat_currP = thermo.get_T_sat(cur_P_pa) - 273.15
-                                
-                                if latest_data.get("Q", 0) > 0 and latest_data.get("T", 25) >= T_sat_currP:
-                                    steam_loss_lpm = 0.0267  # 1kW heater loses ~26.7 mL/min
-                                    
-                                    # Steam turns to gas — liquid level decreases regardless
-                                    water_mass_kg -= steam_loss_lpm * dt_min * 0.997
-                                    flow_out_L = steam_loss_lpm * dt_min
-                                
+                                cur_T_actual = latest_data.get("T", 25.0)
+                                rho_w_actual = thermo.get_rho_w_subcooled(cur_P_pa, cur_T_actual)
+                                if flow_lpm_clean > 0:
+                                    water_mass_kg += flow_lpm_clean * dt_min * (rho_w_actual / 1000.0)
+
+                                # 2. Steam OUT (Physical Venting & Leaks)
+                                # Mass only leaves the boiler if the valve is open or via parasitic leaks.
+                                # Boiling in a closed vessel conserves total mass (liquid turns to trapped vapor).
+                                P_gauge_bar = max(0.0, cur_P_pa / 1e5 - 1.013)
+                                m_leak_kg_s = const.K_LEAK * P_gauge_bar
+                                m_valve_kg_s = 0.0
+
+                                if latest_data.get("valve") == "OPEN" and P_gauge_bar > 0.02:
+                                    rho_s = thermo.get_rho_s(cur_P_pa)
+                                    A_orifice = 3.14159 / 4.0 * const.D_PIPE**2
+                                    k = 1.3
+                                    r = 1.013e5 / cur_P_pa
+                                    r_c = (2.0 / (k + 1.0)) ** (k / (k - 1.0))
+                                    if r <= r_c: r = r_c
+                                    term = max(0.0, (k / (k - 1.0)) * (r**(2.0/k) - r**((k+1.0)/k)))
+                                    m_valve_kg_s = const.C_D_VALVE * A_orifice * 1.0 * (2.0 * cur_P_pa * rho_s * term)**0.5
+
+                                mass_loss_kg = (m_leak_kg_s + m_valve_kg_s) * dt_sec
+                                water_mass_kg -= mass_loss_kg
+                                flow_out_L = mass_loss_kg / (rho_w_actual / 1000.0)
+
                                 # ── V_new = V_old + (dV/dt * dt) ──
-                                current_water_volume_L += (flow_in_L - flow_out_L)
-                                    
+                                from config import constants as const
+                                current_water_volume_L = max(0.1, min(current_water_volume_L + (flow_in_L - flow_out_L), const.V_T * 1000.0))
+
+                                # Hard-clamp water mass to physical vessel capacity to prevent hydraulic lock in the model
+                                water_mass_kg = min(water_mass_kg, const.V_T * rho_w_actual)
+
                                 # Make this live explicitly visible to dashboard as a live sensor!
                                 latest_data["Water_Volume_Liters"] = round(current_water_volume_L, 3)
-                            
+
                             last_flow_time = now
                         except: pass
                     elif "Pump:" in line:
@@ -480,7 +639,11 @@ def read_serial():
                         except: pass
                     elif "Heater:" in line:
                         val = line.split(":")[1].strip()
-                        latest_data["Q"] = 1000.0 if val == "ON" else 0.0
+                        new_Q = 1000.0 if val == "ON" else 0.0
+                        # Log heater state transitions
+                        if new_Q != latest_data["Q"]:
+                            print(f"🔥 HEATER STATE CHANGED → {val} (Q: {latest_data['Q']}→{new_Q}W) | Ready: {latest_data.get('ready', '?')} | FloatHigh: {latest_data.get('float_high', '?')}")
+                        latest_data["Q"] = new_Q
                         # Serial confirmed heater state — clear pending flag
                         if val == "ON":
                             heater_cmd_pending = False
@@ -490,19 +653,24 @@ def read_serial():
                         latest_data["mode"] = line.split(":")[1].strip()
                     elif "FloatLow:" in line:
                         latest_data["float_low"] = 1 if line.split(":")[1].strip() == "1" else 0
+                        sync_water_from_float_state()
                     elif "FloatHigh:" in line:
                         latest_data["float_high"] = 1 if line.split(":")[1].strip() == "1" else 0
+                        sync_water_from_float_state()
                     elif "Valve:" in line:
                         val = line.split(":")[1].strip()
                         if val in ("OPEN", "CLOSED"):
                             latest_data["valve"] = val
                     elif "Ready:" in line:
-                        latest_data["ready"] = 1 if line.split(":")[1].strip() == "1" else 0
+                        new_ready = 1 if line.split(":")[1].strip() == "1" else 0
+                        if new_ready != latest_data.get("ready", -1):
+                            print(f"⚠️ SYSTEM READY STATE → {'READY' if new_ready else 'NOT READY (heater will be blocked!)'} | FloatHigh: {latest_data.get('float_high', '?')}")
+                        latest_data["ready"] = new_ready
 
                     # ── Live Analytical Updates ──
                     now = time.time()
                     dt_sec = now - last_flow_time if 'last_flow_time' in globals() else 2.0
-                    
+
                     # 0. EKF Predict-Update Cycle (sensor-model fusion)
                     try:
                         boiler_ekf.predict_and_update(
@@ -518,67 +686,69 @@ def read_serial():
                         fused = boiler_ekf.get_fused_state()
                         latest_data["kalman"] = fused
                     except Exception as ekf_err:
-                        print(f"⚠️ [EKF] Update failed (non-fatal): {ekf_err}")
+                        print(f"⚠️ [EKF] Update failed: {ekf_err}")
 
                     # 1. Update Efficiency Tracker
-                    efficiency_tracker.update(
-                        T_celsius=latest_data["T"],
-                        P_abs_bar=latest_data["P"],
-                        Q_watts=latest_data["Q"],
-                        water_mass_kg=water_mass_kg,
-                        dt_seconds=dt_sec
-                    )
+                    try:
+                        efficiency_tracker.update(
+                            T_celsius=latest_data["T"],
+                            P_abs_bar=latest_data["P"],
+                            Q_watts=latest_data["Q"],
+                            water_mass_kg=water_mass_kg,
+                            dt_seconds=dt_sec
+                        )
+                    except Exception as eff_err:
+                        print(f"⚠️ [Efficiency] Update failed: {eff_err}")
 
                     # 2. Update Validation Logger with current actuals
-                    validation_logger.record_actual(
-                        T=latest_data["T"],
-                        P=latest_data["P"]
-                    )
-
-                    # 3. Update Anomaly Detector (if we have prediction history)
-                    # Uses the EKF state estimator for optimal model-reality comparison.
-
-                    # 4. Session Logging (throttle to ~1Hz)
-                    # Assuming ~5-10 lines per second from serial, log every 5th line
-                    if session_logger.row_count % 5 == 0:
-                        session_logger.log(
-                            T_act=latest_data["T"],
-                            P_gauge=max(0, latest_data["P"] - 1.013),
-                            T_pred=None, # will be matched in post-processing or via val_logger
-                            P_pred=None,
-                            Q=latest_data["Q"],
-                            flow=latest_data["mw"],
-                            water_L=latest_data.get("Water_Volume_Liters", 0),
-                            eta=efficiency_tracker.instantaneous_eta,
-                            health=anomaly_detector.health_score,
-                            anomaly=len(anomaly_detector.active_anomalies) > 0
+                    try:
+                        validation_logger.record_actual(
+                            T=latest_data["T"],
+                            P_abs=latest_data["P"]
                         )
-                    else:
-                        # Just increment internal counter to keep it moving if we skip
-                        # Actually session_logger.log increments it, so we need a local counter
-                        pass
+                    except Exception as val_err:
+                        print(f"⚠️ [Validation] Record failed: {val_err}")
 
-                # Increment a simple local counter to throttle
-                if 'log_throttle' not in locals(): log_throttle = 0
-                log_throttle += 1
-                if log_throttle >= 5:
-                    log_throttle = 0
-                    session_logger.log(
-                        T_act=latest_data["T"],
-                        P_gauge=max(0, latest_data["P"] - 1.013),
-                        T_pred=None,
-                        P_pred=None,
-                        Q=latest_data["Q"],
-                        flow=latest_data["mw"],
-                        water_L=latest_data.get("Water_Volume_Liters", 0),
-                        eta=efficiency_tracker.instantaneous_eta,
-                        health=anomaly_detector.health_score,
-                        anomaly=len(anomaly_detector.active_anomalies) > 0
-                    )
-                        
+                    # 3. Session Logging (throttle to ~1Hz)
+                    # We use a simple counter to log every 5th valid line
+                    if 'log_throttle' not in locals(): log_throttle = 0
+                    log_throttle += 1
+                    if log_throttle >= 5:
+                        log_throttle = 0
+                        try:
+                            short_forecast = compute_short_forecast()
+                            if short_forecast["T"] is not None and short_forecast["P"] is not None:
+                                validation_logger.record_prediction([{
+                                    "t_min": short_forecast["horizon_s"] / 60.0,
+                                    "T": short_forecast["T"],
+                                    "P": short_forecast["P"],
+                                }])
+
+                            session_logger.log(
+                                T_act=latest_data["T"],
+                                P_gauge=max(0, latest_data["P"] - 1.013),
+                                T_pred=short_forecast["T"],
+                                P_pred=short_forecast["P"],
+                                Q=latest_data["Q"],
+                                flow=latest_data["mw"],
+                                water_L=latest_data.get("Water_Volume_Liters", 0),
+                                eta=efficiency_tracker.instantaneous_eta,
+                                health=anomaly_detector.health_score,
+                                anomaly=len(anomaly_detector.active_anomalies) > 0,
+                                prediction_horizon_s=short_forecast["horizon_s"],
+                                prediction_target_timestamp=short_forecast["target_ts"],
+                                L_pred=short_forecast["L"]
+                            )
+                        except Exception as log_err:
+                            print(f"⚠️ [Logger] CSV log failed: {log_err}")
+
         except Exception as e:
             if is_connected:
-                print(f"⚠️ Serial Disconnected! Hardware unplugged?")
+                print(f"⚠️ Serial Error: {e}")
+                # Don't just say unplugged, show the traceback if it's not a SerialException
+                if not isinstance(e, serial.SerialException):
+                    import traceback
+                    traceback.print_exc()
                 is_connected = False
             time.sleep(2)
 
@@ -589,24 +759,24 @@ def run_autopilot():
     """
     global autopilot_state, latest_data, water_mass_kg
     print("🤖 Predictive Autopilot Thread Started")
-    
+
     while True:
         try:
             # Heartbeat for debugging
             # print(f"DEBUG: Autopilot Thread Heartbeat (Mode: {autopilot_state['mode']}, Connected: {is_connected})")
-            
+
             if not is_connected or autopilot_state["mode"] != "auto":
                 time.sleep(2)
                 continue
-            
+
             print(f"🤖 [Auto] Decision Cycle Start...")
-            
+
             # 1. Get current state
             P_gauge = max(0, latest_data["P"] - 1.013)
             T_curr = latest_data["T"]
             mw_curr = latest_data.get("mw", 0) / 60.0
             target = autopilot_state["target_p"]
-            
+
             # 2. Run 5-minute "What If" Forecast (assuming 1kW heater is ON)
             # Internal prediction for proactive decision making
             P_init_pa = latest_data["P"] * 1e5
@@ -615,7 +785,7 @@ def run_autopilot():
                 P_pa=P_init_pa,
                 water_mass_kg=water_mass_kg
             )
-            
+
             # Predict 5 minutes ahead
             P_final, _, _, _, _, _ = predict_forward(
                 P_init=P_init_pa,
@@ -627,10 +797,10 @@ def run_autopilot():
                 T_init=T_curr,
                 duration=300.0 # 5 minutes
             )
-            
+
             f_p_gauge = max(0, (P_final / 1e5) - 1.013)
             autopilot_state["forecast_p_5min"] = round(f_p_gauge, 3)
-            
+
             # 3. Decision Logic (Proactive Control)
             if P_gauge >= target:
                 # Hard limit reached
@@ -650,9 +820,9 @@ def run_autopilot():
                     command_queue.put("HEATER_ON\n")
                     autopilot_state["status"] = "heating"
                     print(f"🤖 [Auto] Below target. Starting ascent.")
-            
+
             time.sleep(5) # Control cycle interval
-            
+
         except Exception as e:
             print(f"❌ [Autopilot] Error in control loop: {e}")
             time.sleep(5)
@@ -663,7 +833,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         try:
             # Clean path to ignore query parameters like ?predict=true
             clean_path = self.path.split('?')[0]
-            
+
             if clean_path == '/data':
                 if is_connected:
                     self.send_response(200)
@@ -703,7 +873,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                         demand_minutes = int(qp.get('minutes', ['10'])[0])
                         target_pressure_bar = float(qp.get('target_pressure', ['0'])[0])
                         r_fouling_str = qp.get('r_fouling', ['0.0'])[0]
-                        
+
                         try:
                             from config import constants as const
                             const.R_FOULING = float(r_fouling_str)
@@ -822,8 +992,12 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 T_init_val = fused["T_fused"]
                                 P_init_pa = fused["P_fused"] * 1e5
                                 V_init_L = fused["V_fused"]
-                                water_mass_fused = V_init_L * 0.997
-                                print(f"DEBUG: [EKF] Using Kalman-fused state → T={T_init_val:.1f}°C, P={fused['P_fused']:.4f} bar, V={V_init_L:.3f} L")
+                                # FIX: Use subcooled density at actual temperature, NOT saturated density
+                                # get_rho_w() returns density at T_sat (~958 kg/m³ at 1atm/100°C)
+                                # but actual water at 25°C is ~997 kg/m³ — 4% error per cycle!
+                                rho_w_fused = thermo.get_rho_w_subcooled(P_init_pa, T_init_val)
+                                water_mass_fused = V_init_L * (rho_w_fused / 1000.0)
+                                print(f"DEBUG: [EKF] Using Kalman-fused state → T={T_init_val:.1f}°C, P={fused['P_fused']:.4f} bar, V={V_init_L:.3f} L, mass={water_mass_fused:.3f} kg (ρ={rho_w_fused:.1f})")
                             else:
                                 T_init_val = latest_data["T"]
                                 P_init_pa = latest_data["P"] * 1e5
@@ -900,7 +1074,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                                 }
                                 # ── Feature 1: Record prediction for validation ──
                                 validation_logger.record_prediction(timeline)
-                                
+
                                 # ── Feature 3: Update Anomaly Detector with immediate forecast ──
                                 if len(timeline) > 1:
                                     anomaly_detector.update(
@@ -979,7 +1153,7 @@ class RequestHandler(BaseHTTPRequestHandler):
                     if not command.endswith('\n'):
                         command += '\n'
                     command_queue.put(command)
-                    
+
                     self.send_response(200)
                     self.send_header('Access-Control-Allow-Origin', '*')
                     self.end_headers()
@@ -991,9 +1165,9 @@ class RequestHandler(BaseHTTPRequestHandler):
                         autopilot_state['mode'] = cfg['mode']
                     if 'target_p' in cfg:
                         autopilot_state['target_p'] = float(cfg['target_p'])
-                    
+
                     print(f"🤖 [Auto] Configuration Updated: {autopilot_state['mode'].upper()}, Target: {autopilot_state['target_p']} bar")
-                    
+
                     self.send_response(200)
                     self.send_header('Content-type', 'application/json')
                     self.send_header('Access-Control-Allow-Origin', '*')
@@ -1019,7 +1193,7 @@ class RequestHandler(BaseHTTPRequestHandler):
         self.send_header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS')
         self.send_header('Access-Control-Allow-Headers', 'Content-Type')
         self.end_headers()
-            
+
     def log_message(self, format, *args):
         pass # Suppress logging so it doesn't spam the console
 
@@ -1027,11 +1201,11 @@ if __name__ == "__main__":
     # Start the serial reader in the background
     t = threading.Thread(target=read_serial, daemon=True)
     t.start()
-    
+
     # Start the Autopilot background thread
     ta = threading.Thread(target=run_autopilot, daemon=True)
     ta.start()
-    
+
     # Start the local Proxy Web Server for the Next.js Dashboard to read from
     server = HTTPServer(('127.0.0.1', 8080), RequestHandler)
     print("🌐 Python Serial-to-HTTP Proxy running on http://127.0.0.1:8080/data")

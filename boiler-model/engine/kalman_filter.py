@@ -25,6 +25,7 @@ import numpy as np
 import time
 import threading
 import math
+import physics.thermo_relations as thermo
 
 
 class BoilerEKF:
@@ -121,10 +122,13 @@ class BoilerEKF:
             P_init_pa = P_abs_bar * 1e5
 
             # Derive ODE initial conditions from current Kalman state
+            # Convert V(L) to mass(kg) using actual density at T_cur, NOT saturation density at P_init
+            rho_w_curr = thermo.get_rho_w_subcooled(P_init_pa, T_cur)
+                
             Vdw, phi, _ = self._compute_init_fn(
                 T_celsius=T_cur,
                 P_pa=P_init_pa,
-                water_mass_kg=max(0.5, V_cur_L * 0.997)  # V(L) → mass(kg)
+                water_mass_kg=max(0.5, V_cur_L * (rho_w_curr / 1000.0))  # V(L) → mass(kg)
             )
 
             P_f, Vdw_f, phi_f, L_f, T_f, _ = self._predict_fn(
@@ -156,28 +160,30 @@ class BoilerEKF:
                 x_minus[j] -= eps[j]
 
                 # Forward perturbed
+                rho_w_plus = thermo.get_rho_w_subcooled(x_plus[1] * 1e5, x_plus[0])
                 Vdw_p, phi_p, _ = self._compute_init_fn(
                     T_celsius=x_plus[0], P_pa=x_plus[1]*1e5,
-                    water_mass_kg=max(0.5, x_plus[2]*0.997)
+                    water_mass_kg=max(0.5, x_plus[2] * (rho_w_plus / 1000.0))
                 )
-                P_fp, _, _, _, T_fp, _ = self._predict_fn(
+                P_fp, Vdw_fp, _, _, T_fp, _ = self._predict_fn(
                     P_init=x_plus[1]*1e5, Vdw_init=Vdw_p, phi_init=phi_p,
                     m_w=m_w_kgs, Q=Q_watts, valve_opening=valve_opening,
                     T_init=x_plus[0], duration=dt
                 )
-                f_plus = np.array([T_fp, max(P_fp/1e5, 0.5), x_plus[2]])
+                f_plus = np.array([T_fp, max(P_fp/1e5, 0.5), max(Vdw_fp * 1000.0, 0.1)])
 
                 # Backward perturbed
+                rho_w_minus = thermo.get_rho_w_subcooled(x_minus[1] * 1e5, x_minus[0])
                 Vdw_m, phi_m, _ = self._compute_init_fn(
                     T_celsius=x_minus[0], P_pa=x_minus[1]*1e5,
-                    water_mass_kg=max(0.5, x_minus[2]*0.997)
+                    water_mass_kg=max(0.5, x_minus[2] * (rho_w_minus / 1000.0))
                 )
-                P_fm, _, _, _, T_fm, _ = self._predict_fn(
+                P_fm, Vdw_fm, _, _, T_fm, _ = self._predict_fn(
                     P_init=x_minus[1]*1e5, Vdw_init=Vdw_m, phi_init=phi_m,
                     m_w=m_w_kgs, Q=Q_watts, valve_opening=valve_opening,
                     T_init=x_minus[0], duration=dt
                 )
-                f_minus = np.array([T_fm, max(P_fm/1e5, 0.5), x_minus[2]])
+                f_minus = np.array([T_fm, max(P_fm/1e5, 0.5), max(Vdw_fm * 1000.0, 0.1)])
 
                 F[:, j] = (f_plus - f_minus) / (2.0 * eps[j])
 
@@ -227,9 +233,10 @@ class BoilerEKF:
         self.P = I_KH @ self.P @ I_KH.T + K @ self.R @ K.T
 
         # ── Physical sanity clamps ──
+        from config import constants as const
         self.x[0] = max(0.0, min(self.x[0], 200.0))    # T: 0–200 °C
         self.x[1] = max(0.5, min(self.x[1], 12.0))     # P: 0.5–12 bar
-        self.x[2] = max(0.1, min(self.x[2], 6.5))      # V: 0.1–6.5 L
+        self.x[2] = max(2.0, min(self.x[2], const.V_T * 1000.0)) # V: 2L floor — boiler always has water
 
         # ── Store diagnostics ──
         self.innovation = y

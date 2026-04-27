@@ -66,6 +66,18 @@ def get_drho_w_dP(P):
     """d(rho_w)/dP via exact spline derivative."""
     return float(_deriv_rho_w(P))
 
+def get_rho_w_subcooled(P_pa, T_C):
+    """Accurate liquid density (kg/m^3) at any pressure and temperature."""
+    T_K = T_C + 273.15
+    P_MPa = P_pa / 1e6
+    try:
+        water = IAPWS97(T=T_K, P=P_MPa)
+        return float(water.rho)
+    except Exception:
+        # Fallback to saturated density if T_K is somehow out of bounds
+        return get_rho_w(P_pa)
+
+
 
 # --- Steam Density ---
 

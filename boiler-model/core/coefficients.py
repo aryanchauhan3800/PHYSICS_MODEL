@@ -86,6 +86,14 @@ def calculate_vector_D(P, V_dw, phi, m_w, Q_fluid, valve_opening):
     
     m_s = const.C_D_VALVE * A_orifice * valve_opening * np.sqrt(2.0 * P_up * rho_s * term)
     
+    # ── Parasitic Leak: fitting/PRV seat leakage ──
+    # Real boilers are never perfectly sealed. Small leaks through fittings,
+    # gaskets, and the PRV seat allow steam to escape proportional to gauge pressure.
+    # Without this, the sealed-vessel model over-predicts pressure by 3-4x.
+    P_gauge_bar = max(0, (P - const.P_DOWNSTREAM)) / 1e5
+    m_leak = const.K_LEAK * P_gauge_bar
+    m_s = m_s + m_leak
+    
     # Feed water enthalpy — IAPWS-97 subcooled liquid at T_feed and system pressure
     try:
         _fw = IAPWS97(T=const.T_FEED + 273.15, P=max(P, 101325.0) / 1e6)
@@ -107,7 +115,8 @@ def calculate_vector_D(P, V_dw, phi, m_w, Q_fluid, valve_opening):
     A_drum = np.pi / 4.0 * const.D_DRUM**2
     
     v_rise = 1.41 * ( (sigma * g * (rho_w - rho_s)) / (rho_w**2) )**0.25
-    transfer = A_drum * phi * rho_s * v_rise
+    alpha_exit = void.get_exit_void_fraction(phi, P)
+    transfer = A_drum * alpha_exit * rho_s * v_rise
     
     # D1: Liquid Mass Balance
     D[0] = m_w

@@ -1095,7 +1095,7 @@ export default function Dashboard() {
                         />
 
                         {/* Water Level */}
-                        <Area yAxisId="temp" type="monotone" dataKey="L" name="Water Level" stroke="url(#fcStrokeL)" strokeWidth={1.5} fill="url(#fcFillL)" dot={false} activeDot={{ r: 5, fill: '#30D158', stroke: 'rgba(48,209,88,0.4)', strokeWidth: 4 }} strokeDasharray="6 4" animationDuration={1000} />
+                        <Area yAxisId="pressure" type="monotone" dataKey="L" name="Water Level" stroke="url(#fcStrokeL)" strokeWidth={1.5} fill="url(#fcFillL)" dot={false} activeDot={{ r: 5, fill: '#30D158', stroke: 'rgba(48,209,88,0.4)', strokeWidth: 4 }} strokeDasharray="6 4" animationDuration={1000} />
                         {/* Temperature */}
                         <Area yAxisId="temp" type="monotone" dataKey="T" name="Temperature" stroke="url(#fcStrokeT)" strokeWidth={3} fill="url(#fcFillT)" dot={false} activeDot={{ r: 6, fill: '#FF9F0A', stroke: 'rgba(255,159,10,0.4)', strokeWidth: 4 }} filter="url(#fcGlowT)" animationDuration={1200} />
                         {/* Pressure */}

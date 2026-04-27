@@ -30,8 +30,32 @@ def safe_solve_ivp(fun, t_span, y0, method='Radau', t_eval=None, **kwargs):
 #  Initial State Computation from Live Sensor Data
 # ═══════════════════════════════════════════════════════════════════
 
-# Maximum void fraction during subcooled boiling before transition to saturated boiling
-PHI_MAX_SUBCOOLED = 0.005
+# Maximum mass quality during subcooled boiling before transition to saturated boiling
+PHI_MAX_SUBCOOLED = 1.0e-5
+CP_WATER = 4186.0
+K_WATER = 2.2e9
+
+
+def get_liquid_density(P_pa, T_celsius):
+    """
+    Liquid-water density for level and thermal-mass calculations.
+
+    Saturated tables are correct once boiling starts, but using saturated
+    density during subcooled heating underestimates cold water mass by a few
+    percent. That error directly becomes temperature and level drift.
+    """
+    T_sat_C = thermo.get_T_sat(max(P_pa, 5000.0)) - 273.15
+    if T_celsius >= T_sat_C - 0.25:
+        return thermo.get_rho_w(P_pa)
+    rho = thermo.get_rho_w_subcooled(P_pa, T_celsius)
+    if not np.isfinite(rho) or rho < 850.0 or rho > 1100.0:
+        return thermo.get_rho_w(P_pa)
+    return rho
+
+
+def clamp_mixture_volume(V_dw):
+    """Keep predicted mixture volume inside the physical drum."""
+    return min(max(V_dw, 1e-6), const.V_T * 0.995)
 
 def water_thermal_expansion_beta(T_celsius):
     """
@@ -71,39 +95,29 @@ def compute_initial_state(T_celsius, P_pa, water_mass_kg):
       phi   — Steam quality / void fraction
       L     — Water level (m) above boiler bottom
     """
-    T_K = T_celsius + 273.15
-    P_MPa = P_pa / 1e6
-
     # Saturation temperature and incipient superheat (ONB)
     P_atm = 1.013e5
     T_sat_C = thermo.get_T_sat(P_pa if P_pa > P_atm else P_atm) - 273.15
-    
+
     # ── Dynamic Onset of Nucleate Boiling (ONB) ──
     # Using Davis-Anderson correlation (Hsu criterion)
     # DeltaT_ONB = sqrt( (8 * sigma * T_sat * q'') / (k_l * rho_s * h_fg) )
     Q_avg = 1000.0  # Assumed nominal 1kW for initialization
     q_flux = Q_avg / const.A_HEATER
-    
+
     sigma = thermo.get_sigma(P_pa)
     k_l = thermo.get_k_l(P_pa, T_celsius)
     rho_s = thermo.get_rho_s(P_pa)
     h_fg = thermo.get_h_fg(P_pa)
     T_sat_K = T_sat_C + 273.15
-    
+
     superheat_ONB = np.sqrt((8.0 * sigma * T_sat_K * q_flux) / (k_l * rho_s * h_fg))
     T_ONB = T_sat_C - (max(5.0, min(superheat_ONB, 25.0))) # Delta below T_sat for incipient bubbles
 
     # ── Water density from IAPWS-97 ──
     if T_celsius < T_sat_C:
         # Subcooled / compressed liquid
-        try:
-            water = IAPWS97(T=T_K, P=P_MPa)
-            rho_w = water.rho
-        except Exception:
-            # Fallback: empirical correlation for liquid water (0–100 °C)
-            rho_w = (999.84 + 16.945 * T_celsius
-                     - 7.987e-3 * T_celsius**2
-                     - 46.17e-6 * T_celsius**3)
+        rho_w = get_liquid_density(P_pa, T_celsius)
     else:
         # At or above saturation — use saturated liquid density
         rho_w = thermo.get_rho_w(P_pa)
@@ -111,15 +125,19 @@ def compute_initial_state(T_celsius, P_pa, water_mass_kg):
     # ── Void fraction (steam quality) ──
     if T_celsius >= T_sat_C:
         # At saturation: steady-state void fraction from bubble rise dynamics
-        # phi = m_g / (rho_s * A_D * v_rise)
+        # alpha_ss = m_g_est / (rho_s * A_D * v_rise)
         m_g_est = Q_avg / h_fg
         v_rise = 1.41 * ( (sigma * 9.81 * (rho_w - rho_s)) / (rho_w**2) )**0.25
-        phi_ss = m_g_est / (rho_s * const.A_D * v_rise)
-        phi = min(max(phi_ss, 0.005), 0.95)
+        alpha_ss = m_g_est / (rho_s * const.A_D * v_rise)
+        alpha_ss = min(max(alpha_ss, 0.005), 0.95)
+        # Convert void fraction alpha to mass quality phi
+        phi = (alpha_ss * rho_s) / (alpha_ss * rho_s + (1.0 - alpha_ss) * rho_w)
     elif T_celsius > T_ONB:
         # Subcooled nucleate boiling: small bubbles on heated wall
         subcool_frac = (T_celsius - T_ONB) / (T_sat_C - T_ONB)
-        phi = 0.005 * subcool_frac ** 2
+        alpha_sub = 0.005 * subcool_frac ** 2
+        # Convert to quality
+        phi = (alpha_sub * rho_s) / (alpha_sub * rho_s + (1.0 - alpha_sub) * rho_w)
     else:
         # Pure subcooled liquid — no bubbles
         phi = 0.0
@@ -128,7 +146,7 @@ def compute_initial_state(T_celsius, P_pa, water_mass_kg):
     # Pure liquid volume
     V_liquid = water_mass_kg / rho_w
     # Total mixture volume (liquid + bubbles)
-    Vdw = V_liquid / (1.0 - min(phi, 0.95))
+    Vdw = clamp_mixture_volume(V_liquid / (1.0 - min(phi, 0.95)))
 
     # ── Apparent Water level  =  mixture volume / cross-section area ──
     # Clamp to drum height to prevent overflow in calculations
@@ -175,26 +193,26 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
     else:
         P, V_dw, phi = y
         T_wall = thermo.get_T_sat(P) - 273.15 + 5.0 # fallback
-    
+
     # Boundary clamps to prevent solver from evaluating unphysical states
     # which could domain error in square roots or steam tables computation
     P_safe = min(max(P, 5000.0), 1000000.0) # Cap at 10 bar (Safety Relief Valve)
     V_dw_safe = max(V_dw, 1e-6)            # Dry-run floor (1ml)
     phi_safe = max(0.0, min(0.99, phi))    # Prevent pure steam singularity
-    
+
     # --- Metal Wall Heat Transfer (Thom Correlation + CHF Guard) ---
     T_water = thermo.get_T_sat(P_safe) - 273.15
     delta_T_sat = max(T_wall - T_water, 0.0)
-    
+
     # Baseline natural convection to liquid water
-    H_conv = 500.0  
-    
+    H_conv = 500.0
+
     # Thom correlation for nucleate boiling of water:
     # delta_T = 22.65 * (q'' / 1e6)^0.5 * exp(-P / 8.7e6)
     # => q'' = 1e6 * (delta_T * exp(P / 8.7e6) / 22.65)^2
     if delta_T_sat > 0:
         q_flux_boil = 1e6 * ( (delta_T_sat * np.exp(P_safe / 8.7e6)) / 22.65 )**2
-        
+
         # ── CHF Guard: Zuber's Critical Heat Flux Correlation ──
         # q''_CHF = 0.131 · h_fg · ρ_s · [σ·g·(ρ_w−ρ_s)/ρ_s²]^0.25
         #
@@ -210,36 +228,36 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
         sigma_chf = thermo.get_sigma(P_safe)
         h_fg_chf = thermo.get_h_fg(P_safe)
         g = 9.81
-        
+
         q_CHF = 0.131 * h_fg_chf * rho_s_chf * (
             (sigma_chf * g * (rho_w_chf - rho_s_chf)) / (rho_s_chf**2)
         )**0.25
-        
+
         # Cap the boiling heat flux at CHF — never enter film boiling
         q_flux_boil = min(q_flux_boil, q_CHF)
-        
+
         H_boil = q_flux_boil / delta_T_sat
     else:
         H_boil = 0.0
-        
+
     H_total = H_conv + H_boil
     U_eff = 1.0 / (1.0 / H_total + const.R_FOULING)
-    
+
     # True temperature diff for heat transfer (can be subcooled)
     Q_transfer = U_eff * const.A_HEATER * (T_wall - T_water)
-    
+
     # Environmental heat loss from the metal wall itself
     # The heated wall section loses heat to the surrounding air via natural convection.
     # (The bulk fluid surface loss is already captured in calculate_vector_D's D[2] term.)
     Q_wall_loss = const.U_LOSS * const.A_HEATER * max(T_wall - const.T_AMB, 0.0)
-    
+
     # Metal Wall ODE (complete energy balance for the wall node)
     # dT_wall/dt = (Q_heater - Q_to_water - Q_to_environment) / (M_metal · C_metal)
     dT_wall_dt = (Q - Q_transfer - Q_wall_loss) / (const.M_M * const.C_M)
-    
+
     # Calculate fluid derivatives using Q_transfer instead of Q
     X = list(model.solve_system(P_safe, V_dw_safe, phi_safe, m_w, Q_transfer, valve_opening))
-    
+
     # ── Live Thermodynamic Audits ──
     _audit_step_count += 1
     # Mass conservation audit (every 10th step to avoid performance hit)
@@ -277,7 +295,7 @@ def system_derivatives(t, y, m_w, Q, valve_opening):
     # If pressure exceeds 10 bar, dP/dt is capped at 0 (venting to atmosphere)
     if P >= 1000000.0 and X[0] > 0:
         X[0] = 0.0
-    
+
     if len(y) == 4:
         return [X[0], X[1], X[2], dT_wall_dt]
     else:
@@ -289,20 +307,19 @@ def calculate_dynamic_temperature(P, V_dw, Q, duration, T_prev):
     Returns the predicted temperature after 'duration' seconds.
     """
     T_sat = model.calculate_temperature(P)
-    
+
     if T_prev is not None and T_prev < T_sat:
         # P in Pa for thermo lookups
         P_pa = P * 1e5 if P < 100 else P
-        rho_w = thermo.get_rho_w(P_pa)
+        rho_w = get_liquid_density(P_pa, T_prev)
         M_water = rho_w * V_dw
-        
+
         # Effective thermal mass (Water + Metal)
-        CP_WATER = 4186.0 
         thermal_mass = (M_water * CP_WATER) + (const.M_M * const.C_M)
-        
+
         Q_loss = const.U_LOSS * const.A_VESSEL * max(T_prev - const.T_AMB, 0.0)
         Q_net = Q - Q_loss
-        
+
         if Q_net > 0:
             dT_rise = (Q_net * duration) / thermal_mass
             return min(T_prev + dT_rise, T_sat)
@@ -310,7 +327,7 @@ def calculate_dynamic_temperature(P, V_dw, Q, duration, T_prev):
             # If Q_net <= 0, temperature drops or stays stable
             dT_drop = (Q_net * duration) / thermal_mass
             return max(T_prev + dT_drop, const.T_AMB)
-            
+
     return T_sat
 
 def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=None, T_wall_init=None, duration=300.0, dt=1.0):
@@ -333,10 +350,9 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
 
     # ── Subcooled check ──
     T_sat_currP = thermo.get_T_sat(P_init) - 273.15
-    if cur_T < T_sat_currP and Q > 0:
-        rho_w = thermo.get_rho_w(P_atm)
+    if cur_T < T_sat_currP:
+        rho_w = get_liquid_density(P_init, cur_T)
         M_water = rho_w * Vdw_init * (1.0 - phi_init) # kg of pure liquid water
-        CP_WATER = 4186.0                    # J/(kg·K)
         thermal_mass = (M_water * CP_WATER) + (const.M_M * const.C_M)
 
         # ── Dynamic Onset of Nucleate Boiling (ONB) ──
@@ -346,7 +362,7 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
         rho_s = thermo.get_rho_s(P_atm)
         h_fg = thermo.get_h_fg(P_atm)
         T_sat_K = T_sat_currP + 273.15
-        
+
         superheat_ONB = np.sqrt((8.0 * sigma * T_sat_K * q_flux) / (k_l * rho_s * h_fg))
         T_ONB = T_sat_currP - (max(5.0, min(superheat_ONB, 25.0)))
 
@@ -358,7 +374,7 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
             epsilon = (1.0 - np.exp(-Z)) / (1.0 - np.exp(-1.0))
         else:
             epsilon = 0.0
-            
+
         Q_loss = const.U_LOSS * const.A_VESSEL * max(cur_T - const.T_AMB, 0.0)
         Q_net = max(Q - Q_loss, 0.0)
         Q_sensible = Q_net * (1.0 - 0.10 * epsilon) # Max 10% latent loss at sat point
@@ -370,33 +386,68 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
             # ── Sub-step to capture sealed-vessel pressure rise ──
             # Combined gas-cap compression + water compressibility model.
             # dP = (beta * dT * V_water) / (V_gas/P + V_water/K_water)
-            K_WATER = 2.2e9  # Bulk modulus of water (Pa)
             n_sub = int(max(1, duration / 2.0))
             sub_dt = duration / n_sub
             cur_P_sub = P_init
             cur_Vdw_sub = Vdw_init
             T_accum = cur_T
+            water_mass_sub = M_water
             for _ in range(n_sub):
-                dT_sub = (Q_sensible * sub_dt) / thermal_mass
+                if m_w > 0:
+                    water_mass_sub += m_w * sub_dt
+                thermal_mass = (water_mass_sub * CP_WATER) + (const.M_M * const.C_M)
+                dT_heat = (Q_sensible * sub_dt) / thermal_mass
+                dT_mix = 0.0
+                if m_w > 0 and water_mass_sub > 1e-6:
+                    dT_mix = (m_w * CP_WATER * (const.T_FEED - T_accum) * sub_dt) / thermal_mass
+                dT_sub = dT_heat + dT_mix
                 T_accum += dT_sub
                 # Sealed-vessel pressure rise from thermal expansion
                 beta_T = water_thermal_expansion_beta(T_accum)
-                V_gas = max(1e-6, const.V_T - cur_Vdw_sub)
+                # Ensure a minimum gas headspace of 500mL to prevent numerical hydraulic lock
+                V_gas = max(0.0005, const.V_T - cur_Vdw_sub)
                 # Effective compressibility: gas cap (ideal gas) + liquid water
                 C_gas = V_gas / cur_P_sub   # gas cap compressibility (m³/Pa)
                 C_water = cur_Vdw_sub / K_WATER  # water compressibility (m³/Pa)
                 dP = (beta_T * dT_sub * cur_Vdw_sub) / (C_gas + C_water)
-                cur_P_sub += dP
+
+                # Parasitic steam leak is a continuous physical effect.
+                # It must be applied even when the valve is closed, otherwise 
+                # the subcooled sealed regime will diverge from reality and the ODE regime.
+                P_gauge_sub = max(0, cur_P_sub - 1.013e5) / 1e5
+                m_leak_sub = const.K_LEAK * P_gauge_sub * sub_dt
+                if V_gas > 0:
+                    dP_leak = m_leak_sub * cur_P_sub / (V_gas * thermo.get_rho_s(cur_P_sub))
+                else:
+                    dP_leak = 0.0
+
+                cur_P_sub += dP - dP_leak
+                
+                # Mass lost from leak must be removed from the subcooled water inventory
+                water_mass_sub -= m_leak_sub
+
                 # Update water volume (thermal expansion minus compression)
                 dV_expand = cur_Vdw_sub * beta_T * dT_sub - C_water * dP
-                cur_Vdw_sub += dV_expand
+                if m_w > 0:
+                    rho_feed = get_liquid_density(cur_P_sub, const.T_FEED)
+                    dV_feed = (m_w * sub_dt) / rho_feed
+                else:
+                    dV_feed = 0.0
+                
+                # Deduct liquid volume converted to vapor and leaked
+                rho_current = get_liquid_density(cur_P_sub, T_accum)
+                dV_leak = m_leak_sub / rho_current
+                cur_Vdw_sub = clamp_mixture_volume(cur_Vdw_sub + dV_expand + dV_feed - dV_leak)
 
             T_final = T_accum
             L_final = cur_Vdw_sub / const.A_D
             # Compute subcooled phi at final temperature
             if T_final > T_ONB:
                 sf = (T_final - T_ONB) / (T_sat_currP - T_ONB)
-                phi_final = 0.005 * sf ** 2
+                alpha_final = 0.005 * sf ** 2
+                rho_s_f = thermo.get_rho_s(cur_P_sub)
+                rho_w_f = thermo.get_rho_w(cur_P_sub)
+                phi_final = (alpha_final * rho_s_f) / (alpha_final * rho_s_f + (1.0 - alpha_final) * rho_w_f)
             else:
                 phi_final = 0.0
             return cur_P_sub, cur_Vdw_sub, phi_final, L_final, T_final, T_final + 2.0
@@ -479,10 +530,10 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
     cur_T_wall = cur_T + 2.0
 
     # ── Thermal mass for subcooled energy balance ──
-    rho_w = thermo.get_rho_w(P_atm)
+    rho_w = get_liquid_density(cur_P, cur_T)
     M_water   = rho_w * Vdw_init * (1.0 - phi_init)  # kg of pure liquid
-    CP_WATER  = 4186.0                               # J/(kg·K)
     thermal_mass = (M_water * CP_WATER) + (const.M_M * const.C_M)
+    water_mass_liq = M_water
 
     boiling_active = cur_T >= (thermo.get_T_sat(cur_P) - 273.15)
     results = []
@@ -496,58 +547,88 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
             # ═══════════════════════════════════════════════════════
             #  REGIME 1 :  Subcooled Heating (with nucleate boiling)
             # ═══════════════════════════════════════════════════════
-            if Q > 0:
+            if Q > 0 or m_w > 0:
                 # ── Dynamic ONB and Heat Partitioning via Sub-stepping ──
-                # Use 1-second internal steps because P rises and immediately suppresses boiling
+                # Also update inlet flow here; otherwise water-level prediction
+                # freezes whenever the heater is off.
                 sub_steps = int(max(1, dt / 2.0)) # 2-second sub-steps for speed
                 sub_dt = dt / sub_steps
-                
-                q_flux = Q / const.A_HEATER
+
+                q_flux = max(Q, 0.0) / const.A_HEATER
                 sigma = thermo.get_sigma(P_atm)
                 k_l = thermo.get_k_l(P_atm, cur_T)
                 rho_s = thermo.get_rho_s(P_atm)
                 h_fg = thermo.get_h_fg(P_atm)
-                
+
                 new_T_accum = cur_T
-                
+
                 for _ in range(sub_steps):
+                    if m_w > 0:
+                        water_mass_liq += m_w * sub_dt
+                        rho_feed = get_liquid_density(cur_P, const.T_FEED)
+                        cur_Vdw = clamp_mixture_volume(cur_Vdw + (m_w * sub_dt) / rho_feed)
+
+                    thermal_mass = (water_mass_liq * CP_WATER) + (const.M_M * const.C_M)
                     T_sat_currP_sub = thermo.get_T_sat(cur_P) - 273.15
-                    superheat_ONB = np.sqrt((8.0 * sigma * (T_sat_currP_sub+273.15) * q_flux) / (k_l * rho_s * h_fg))
+                    superheat_ONB = np.sqrt((8.0 * sigma * (T_sat_currP_sub+273.15) * q_flux) / (k_l * rho_s * h_fg)) if q_flux > 0 else 0.0
                     T_ONB_i = T_sat_currP_sub - (max(5.0, min(superheat_ONB, 25.0)))
-    
+
                     if new_T_accum > T_ONB_i:
                         Z = (new_T_accum - T_ONB_i) / (T_sat_currP_sub - T_ONB_i)
                         epsilon = (1.0 - np.exp(-Z)) / (1.0 - np.exp(-1.0))
                     else:
                         epsilon = 0.0
-                    
+
                     Q_loss = const.U_LOSS * const.A_VESSEL * max(new_T_accum - const.T_AMB, 0.0)
                     Q_net = max(Q - Q_loss, 0.0)
                     Q_sensible = Q_net * (1.0 - 0.10 * epsilon)
                     Q_latent = Q_net - Q_sensible
-                    
+
                     if Q_latent > 0:
                         m_g_subcooled = Q_latent / h_fg
                         V_above = max(0.0001, const.V_T - cur_Vdw)
                         d_rho_g = (m_g_subcooled * sub_dt) / V_above
                         dP_subcooled = d_rho_g / thermo.get_drho_s_dP(cur_P)
                         cur_P += dP_subcooled
-    
-                    dT = (Q_sensible * sub_dt) / thermal_mass
+
+                    dT_heat = (Q_sensible * sub_dt) / thermal_mass
+                    dT_mix = 0.0
+                    if m_w > 0 and water_mass_liq > 1e-6:
+                        dT_mix = (m_w * CP_WATER * (const.T_FEED - new_T_accum) * sub_dt) / thermal_mass
+                    dT = dT_heat + dT_mix
                     new_T_accum += dT
-    
+
                     # ── Sealed-vessel pressure rise from thermal expansion ──
                     # Combined gas-cap + water compressibility model
                     K_WATER = 2.2e9  # Bulk modulus of water (Pa)
                     beta_T = water_thermal_expansion_beta(new_T_accum)
-                    V_gas = max(1e-6, const.V_T - cur_Vdw)
+                    # Minimum gas headspace floor (500mL) — prevents near-hydraulic-lock
+                    # feedback where shrinking gas cap causes dP/dT → ∞
+                    V_gas = max(0.0005, const.V_T - cur_Vdw)
                     C_gas = V_gas / cur_P
                     C_water = cur_Vdw / K_WATER
                     dP_therm = (beta_T * dT * cur_Vdw) / (C_gas + C_water)
-                    cur_P = min(cur_P + dP_therm, 10e5) # Cap at 10 bar (Safety Valve)
-                    dV_expand = cur_Vdw * beta_T * dT - C_water * dP_therm
-                    cur_Vdw += dV_expand
+
+                    # Parasitic steam leak is a continuous physical effect.
+                    P_gauge_sub = max(0, cur_P - 1.013e5) / 1e5
+                    m_leak_sub = const.K_LEAK * P_gauge_sub * sub_dt
+                    if V_gas > 0:
+                        dP_leak = m_leak_sub * cur_P / (V_gas * thermo.get_rho_s(cur_P))
+                    else:
+                        dP_leak = 0.0
+
+                    cur_P = min(cur_P + dP_therm - dP_leak, 10e5) # Cap at 10 bar (Safety Valve)
                     
+                    # Mass lost from leak must be removed from the subcooled water inventory
+                    water_mass_liq -= m_leak_sub
+                    
+                    dV_expand = cur_Vdw * beta_T * dT - C_water * dP_therm
+                    
+                    # Deduct liquid volume converted to vapor and leaked
+                    rho_current = get_liquid_density(cur_P, new_T_accum)
+                    dV_leak = m_leak_sub / rho_current
+                    cur_Vdw = clamp_mixture_volume(cur_Vdw + dV_expand - dV_leak)
+
                 new_T = new_T_accum
                 T_sat_currP = thermo.get_T_sat(cur_P) - 273.15
 
@@ -570,7 +651,7 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                             method='Radau',
                             t_eval=[remaining_dt]
                         )
-                        
+
                         if sol.success and sol.y.shape[1] > 0:
                             cur_P   = max(sol.y[0, -1], P_atm)
                             cur_Vdw = max(sol.y[1, -1], 0.0)
@@ -589,7 +670,10 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     # Subcooled nucleate boiling: small vapor fraction
                     if cur_T > T_ONB_i:
                         Z = (cur_T - T_ONB_i) / (T_sat_currP - T_ONB_i)
-                        cur_phi = 0.005 * Z ** 2
+                        alpha_sub = 0.005 * Z ** 2
+                        rho_s_sub = thermo.get_rho_s(cur_P)
+                        rho_w_sub = thermo.get_rho_w(cur_P)
+                        cur_phi = (alpha_sub * rho_s_sub) / (alpha_sub * rho_s_sub + (1.0 - alpha_sub) * rho_w_sub)
                     else:
                         cur_phi = 0.0
             # else Q == 0: no heating → state unchanged
@@ -645,15 +729,15 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
     phi = phi_init
     current_T = T_init if T_init is not None else 25.0
     current_T_wall = current_T + 2.0
-    
+
     current_time = 0.0
-    
+
     while True:
         # Compute outputs
         L = model.calculate_drum_level(V_dw, phi, P)
         T = calculate_dynamic_temperature(P, V_dw, Q, dt, current_T)
         current_T = T # Update state for next step
-        
+
         # Yield the current timestep results
         new_inputs = (yield P, V_dw, phi, L, T)
         if new_inputs is not None:
@@ -662,7 +746,7 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
                 m_w, Q, valve_opening, current_T = new_inputs
             else:
                 m_w, Q, valve_opening = new_inputs
-        
+
         # Calculate diagnostics to print (like mg and ms)
         X = model.solve_system(P, V_dw, phi, m_w, Q, valve_opening)
         m_g = X[3]
@@ -670,7 +754,7 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
         rho_s = thermo.get_rho_s(P)
         delta_P = max(P - const.P_DOWNSTREAM, 0.0)
         m_s = const.C_D_VALVE * A_orifice * valve_opening * np.sqrt(2.0 * rho_s * delta_P)
-        
+
         print(f"mg (evaporation rate): {m_g:.4f}")
         print(f"ms = Cd*A*sqrt(2*rho*dP): {m_s:.4f}")
         print("\nCompare:")
@@ -680,10 +764,10 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
             print("If ms < mg -> pressure must rise\n")
         else:
             print("If ms == mg -> pressure stable\n")
-            
+
         # Stepping forward by dt
         y0 = [P, V_dw, phi, current_T_wall]
-        
+
         sol = safe_solve_ivp(
             fun=lambda t, y: system_derivatives(t, y, m_w, Q, valve_opening),
             t_span=(current_time, current_time + dt),
@@ -691,10 +775,10 @@ def run_continuous(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=Non
             method='Radau',
             t_eval=[current_time + dt]
         )
-        
+
         P = max(sol.y[0, -1], 1.0)
         V_dw = max(sol.y[1, -1], 0.0)
         phi = max(0.0, min(1.0, sol.y[2, -1]))
         current_T_wall = sol.y[3, -1]
-        
+
         current_time += dt
