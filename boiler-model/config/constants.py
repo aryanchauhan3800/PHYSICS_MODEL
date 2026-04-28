@@ -47,4 +47,4 @@ A_VESSEL  = math.pi * D_DRUM * H_DRUM + 2.0 * A_D # Total exposed surface area o
 # ── Parasitic Steam Leak (fitting/PRV seat leakage) ──
 # Even when valve is "closed", small leaks exist through fittings and PRV seat.
 # This prevents unphysical sealed-vessel pressure runaway.
-K_LEAK    = 3e-5        # Leak conductance (kg/s per bar of gauge pressure) - calibrated from 10-min pressure bias
+K_LEAK    = 2e-6        # Leak conductance (kg/s per bar of gauge pressure) - calibrated to hold subcooled thermal expansion pressure

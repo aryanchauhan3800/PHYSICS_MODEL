@@ -20,10 +20,26 @@ from engine.kalman_filter import BoilerEKF
 import physics.thermo_relations as thermo
 from config import constants as const
 
+import joblib
+import numpy as np
+import warnings
+
+# Suppress the harmless scikit-learn warning about missing feature names during inference
+warnings.filterwarnings("ignore", message="X does not have valid feature names")
+
+# Load the trained residual models
+try:
+    hybrid_ml_T = joblib.load(str(Path(__file__).parent / 'models/residual_model_T.pkl'))
+    hybrid_ml_P = joblib.load(str(Path(__file__).parent / 'models/residual_model_P.pkl'))
+    print("🧠 Hybrid AI Models Loaded successfully!")
+except Exception as e:
+    hybrid_ml_T = None
+    hybrid_ml_P = None
+    print(f"Physics-only mode. (No AI models found: {e})")
 # --- Calibration Offsets (from session log analysis) ---
 TEMP_CALIBRATION_OFFSET = 0.541
 THERMAL_RESISTANCE_FACTOR = 0.022
-PRESSURE_CALIBRATION_OFFSET = -0.0547
+PRESSURE_CALIBRATION_OFFSET = -0.24  # Adjusted to nullify the 0.74V (0.24 bar) sensor drift at cold 0 pressure
 
 
 # ── Sensor Smoothing (Median + Outlier Rejection) ──────────────────────
@@ -441,7 +457,7 @@ def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
         if effective_Q == 0 and heater_cmd_pending:
             effective_Q = 1000.0
 
-        P_pred, Vdw_pred, _, _, T_pred, _ = predict_forward(
+        P_pred_pa, Vdw_pred, _, _, T_pred, _ = predict_forward(
             P_init=P_init_pa,
             Vdw_init=Vdw_init,
             phi_init=phi_init,
@@ -452,10 +468,36 @@ def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
             duration=float(horizon_s)
         )
 
+        # Convert to dashboard units
+        physics_T = float(T_pred)
+        physics_P = max(0.0, float(P_pred_pa) / 1e5 - 1.013)
+        
+        # 2. Hybrid AI Step: Predict the Residual (Error)
+        error_T = 0.0
+        error_P = 0.0
+        
+        if hybrid_ml_T is not None and hybrid_ml_P is not None:
+            # Create the feature array [T, P, Q, flow, water] matching the training data
+            current_features = np.array([[
+                latest_data["T"], 
+                max(0.0, latest_data["P"] - 1.013), 
+                effective_Q, 
+                latest_data.get("mw", 0.0), 
+                current_water_volume_L
+            ]])
+            
+            # Predict the mistake the physics model is about to make!
+            error_T = hybrid_ml_T.predict(current_features)[0]
+            error_P = hybrid_ml_P.predict(current_features)[0]
+            
+        # 3. Final Hybrid Prediction = Physics + ML Correction
+        hybrid_T = physics_T + error_T
+        hybrid_P = physics_P + error_P
+
         target_ts = datetime.fromtimestamp(time.time() + horizon_s).isoformat()
         return {
-            "T": float(T_pred),
-            "P": max(0.0, float(P_pred) / 1e5 - 1.013),
+            "T": hybrid_T,
+            "P": hybrid_P,
             "L": max(0.0, float(Vdw_pred) * 1000.0),
             "horizon_s": float(horizon_s),
             "target_ts": target_ts,
