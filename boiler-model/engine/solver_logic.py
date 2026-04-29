@@ -35,6 +35,13 @@ PHI_MAX_SUBCOOLED = 1.0e-5
 CP_WATER = 4186.0
 K_WATER = 2.2e9
 
+# Vapor equilibrium efficiency in sealed headspace.
+# Full P_sat(T) assumes instant liquid-vapor equilibrium in the entire
+# headspace.  In reality, trapped air dilutes the vapor and the upper
+# dome is cooler → only ~50% of P_sat contribution is realized.
+# Calibrated from session data: 0.588 bar actual at 96°C.
+ETA_VAPOR = 0.50
+
 
 def get_liquid_density(P_pa, T_celsius):
     """
@@ -401,6 +408,7 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
                 if m_w > 0 and water_mass_sub > 1e-6:
                     dT_mix = (m_w * CP_WATER * (const.T_FEED - T_accum) * sub_dt) / thermal_mass
                 dT_sub = dT_heat + dT_mix
+                T_old = T_accum
                 T_accum += dT_sub
                 # Sealed-vessel pressure rise from thermal expansion
                 beta_T = water_thermal_expansion_beta(T_accum)
@@ -409,7 +417,13 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
                 # Effective compressibility: gas cap (ideal gas) + liquid water
                 C_gas = V_gas / cur_P_sub   # gas cap compressibility (m³/Pa)
                 C_water = cur_Vdw_sub / K_WATER  # water compressibility (m³/Pa)
-                dP = (beta_T * dT_sub * cur_Vdw_sub) / (C_gas + C_water)
+                dP_therm = (beta_T * dT_sub * cur_Vdw_sub) / (C_gas + C_water)
+
+                # Water vapor partial pressure contribution
+                # In a sealed vessel, headspace = trapped air + water vapor.
+                # As T rises, P_sat(T) increases exponentially (dominant above ~60°C).
+                dP_vapor = thermo.get_P_sat(T_accum + 273.15) - thermo.get_P_sat(T_old + 273.15)
+                dP_vapor = max(0.0, dP_vapor) * ETA_VAPOR
 
                 # Parasitic steam leak is a continuous physical effect.
                 # It must be applied even when the valve is closed, otherwise 
@@ -421,13 +435,13 @@ def predict_forward(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=No
                 else:
                     dP_leak = 0.0
 
-                cur_P_sub += dP - dP_leak
+                cur_P_sub += dP_therm + dP_vapor - dP_leak
                 
                 # Mass lost from leak must be removed from the subcooled water inventory
                 water_mass_sub -= m_leak_sub
 
                 # Update water volume (thermal expansion minus compression)
-                dV_expand = cur_Vdw_sub * beta_T * dT_sub - C_water * dP
+                dV_expand = cur_Vdw_sub * beta_T * dT_sub - C_water * dP_therm
                 if m_w > 0:
                     rho_feed = get_liquid_density(cur_P_sub, const.T_FEED)
                     dV_feed = (m_w * sub_dt) / rho_feed
@@ -596,6 +610,7 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     if m_w > 0 and water_mass_liq > 1e-6:
                         dT_mix = (m_w * CP_WATER * (const.T_FEED - new_T_accum) * sub_dt) / thermal_mass
                     dT = dT_heat + dT_mix
+                    T_old_step = new_T_accum
                     new_T_accum += dT
 
                     # ── Sealed-vessel pressure rise from thermal expansion ──
@@ -609,6 +624,12 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     C_water = cur_Vdw / K_WATER
                     dP_therm = (beta_T * dT * cur_Vdw) / (C_gas + C_water)
 
+                    # Water vapor partial pressure contribution
+                    # In a sealed vessel, headspace = trapped air + water vapor.
+                    # As T rises, P_sat(T) increases exponentially (dominant above ~60°C).
+                    dP_vapor = thermo.get_P_sat(new_T_accum + 273.15) - thermo.get_P_sat(T_old_step + 273.15)
+                    dP_vapor = max(0.0, dP_vapor) * ETA_VAPOR
+
                     # Parasitic steam leak is a continuous physical effect.
                     P_gauge_sub = max(0, cur_P - 1.013e5) / 1e5
                     m_leak_sub = const.K_LEAK * P_gauge_sub * sub_dt
@@ -617,7 +638,7 @@ def predict_timeline(P_init, Vdw_init, phi_init, m_w, Q, valve_opening, T_init=N
                     else:
                         dP_leak = 0.0
 
-                    cur_P = min(cur_P + dP_therm - dP_leak, 10e5) # Cap at 10 bar (Safety Valve)
+                    cur_P = min(cur_P + dP_therm + dP_vapor - dP_leak, 10e5) # Cap at 10 bar (Safety Valve)
                     
                     # Mass lost from leak must be removed from the subcooled water inventory
                     water_mass_liq -= m_leak_sub

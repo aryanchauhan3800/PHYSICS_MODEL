@@ -44,6 +44,10 @@ _deriv_rho_s = _spline_rho_s.derivative(1)
 _deriv_h_w   = _spline_h_w.derivative(1)
 _deriv_h_s   = _spline_h_s.derivative(1)
 
+# Reverse spline: P_sat(T) — saturation pressure from temperature
+# Built from the same data but with T as the independent variable
+_spline_P_sat = CubicSpline(_T_sat_arr, _P_nodes, bc_type='natural', extrapolate=True)
+
 
 # --- Saturation Temperature ---
 
@@ -54,6 +58,10 @@ def get_T_sat(P):
 def get_dT_sat_dP(P):
     """dT_sat/dP via exact spline derivative."""
     return float(_deriv_T_sat(P))
+
+def get_P_sat(T_K):
+    """Saturation pressure (Pa) at temperature T (K). Inverse of get_T_sat."""
+    return float(_spline_P_sat(T_K))
 
 
 # --- Liquid Density ---

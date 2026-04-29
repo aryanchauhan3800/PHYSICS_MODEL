@@ -39,7 +39,7 @@ except Exception as e:
 # --- Calibration Offsets (from session log analysis) ---
 TEMP_CALIBRATION_OFFSET = 0.541
 THERMAL_RESISTANCE_FACTOR = 0.022
-PRESSURE_CALIBRATION_OFFSET = -0.24  # Adjusted to nullify the 0.74V (0.24 bar) sensor drift at cold 0 pressure
+PRESSURE_CALIBRATION_OFFSET = -0.33  # Adjusted to nullify sensor drift at cold 0 pressure (sensor ~0.78V → 0.35 bar offset)
 
 
 # ── Sensor Smoothing (Median + Outlier Rejection) ──────────────────────
@@ -498,6 +498,8 @@ def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
         return {
             "T": hybrid_T,
             "P": hybrid_P,
+            "physics_T": physics_T,
+            "physics_P": physics_P,
             "L": max(0.0, float(Vdw_pred) * 1000.0),
             "horizon_s": float(horizon_s),
             "target_ts": target_ts,
@@ -507,6 +509,8 @@ def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
         return {
             "T": None,
             "P": None,
+            "physics_T": None,
+            "physics_P": None,
             "L": None,
             "horizon_s": float(horizon_s),
             "target_ts": datetime.fromtimestamp(time.time() + horizon_s).isoformat(),
@@ -769,8 +773,8 @@ def read_serial():
                             session_logger.log(
                                 T_act=latest_data["T"],
                                 P_gauge=max(0, latest_data["P"] - 1.013),
-                                T_pred=short_forecast["T"],
-                                P_pred=short_forecast["P"],
+                                T_pred=short_forecast["physics_T"],
+                                P_pred=short_forecast["physics_P"],
                                 Q=latest_data["Q"],
                                 flow=latest_data["mw"],
                                 water_L=latest_data.get("Water_Volume_Liters", 0),
@@ -1081,12 +1085,38 @@ class RequestHandler(BaseHTTPRequestHandler):
                                     step_seconds=60.0
                                 )
 
+                                # Predict the 1-minute error rates using the ML model
+                                error_rate_T = 0.0
+                                error_rate_P = 0.0
+                                if hybrid_ml_T is not None and hybrid_ml_P is not None:
+                                    current_features = np.array([[
+                                        latest_data["T"],
+                                        max(0, latest_data["P"] - 1.013),
+                                        latest_data["Q"],
+                                        latest_data.get("mw", 0),
+                                        current_water_volume_L
+                                    ]])
+                                    error_rate_T = hybrid_ml_T.predict(current_features)[0]
+                                    error_rate_P = hybrid_ml_P.predict(current_features)[0]
+
                                 for pt in raw_timeline:
-                                    P_gauge = max(0, clean_val(pt["P"] / 1e5, latest_data["P"]) - 1.013)
+                                    # Base pure physics prediction
+                                    physics_T = clean_val(pt["T"], latest_data["T"])
+                                    physics_P_gauge = max(0, clean_val(pt["P"] / 1e5, latest_data["P"]) - 1.013)
+                                    
+                                    # Temperature error does NOT scale linearly over 10 mins (non-linear heat loss curve)
+                                    # So we apply a flat, smoothed offset. 
+                                    hybrid_T = physics_T + error_rate_T
+                                    
+                                    # Pressure error scales linearly because it's a fixed volume expansion leak rate
+                                    # UPDATE: Since K_LEAK is now 0.0, pure physics handles expansion perfectly.
+                                    # We just apply a flat, smoothed offset to prevent massive overshoots above 100C!
+                                    hybrid_P_gauge = max(0, physics_P_gauge + error_rate_P)
+                                    
                                     timeline.append({
                                         "t_min": pt["t_min"],
-                                        "T": round(clean_val(pt["T"], latest_data["T"]), 1),
-                                        "P": round(P_gauge, 3),
+                                        "T": round(hybrid_T, 1),
+                                        "P": round(hybrid_P_gauge, 3),
                                         "L": round(pt["Vdw"] * 1000.0, 3)
                                     })
 

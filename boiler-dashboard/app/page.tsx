@@ -1224,16 +1224,23 @@ export default function Dashboard() {
                       <div className="badge-outline">MAPE: {liveData.digital_twin?.validation.mape_T ?? '—'}%</div>
                     </div>
                   </div>
-                  <div style={{ height: '180px', width: '100%' }}>
+                  <div style={{ height: '190px', width: '100%', marginTop: '5px' }}>
                     <ResponsiveContainer width="100%" height="100%">
-                      <LineChart data={liveData.digital_twin?.validation.pairs ?? []}>
-                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--border-s)" />
+                      <LineChart data={liveData.digital_twin?.validation.pairs ?? []} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                        <CartesianGrid strokeDasharray="4 4" vertical={false} stroke="var(--border-s)" opacity={0.5} />
                         <XAxis dataKey="t_min" hide />
-                        <YAxis domain={['auto', 'auto']} hide />
-                        <Tooltip content={<DarkTooltip />} />
-                        <Legend iconType="circle" wrapperStyle={{ fontSize: '10px', paddingTop: '10px' }} />
-                        <Line name="Predicted T" type="monotone" dataKey="pred_T" stroke="#FF9F0A" strokeWidth={2} dot={{ r: 3 }} />
-                        <Line name="Actual T" type="monotone" dataKey="act_T" stroke="#0A84FF" strokeWidth={2} dot={{ r: 3 }} />
+                        <YAxis 
+                          domain={['dataMin - 1', 'dataMax + 1']} 
+                          tick={{ fontSize: 10, fill: 'var(--t3)' }} 
+                          tickLine={false} 
+                          axisLine={false} 
+                          width={40} 
+                          tickFormatter={(val) => `${val.toFixed(0)}°`} 
+                        />
+                        <Tooltip content={<DarkTooltip />} cursor={{ stroke: 'var(--border)', strokeWidth: 1.5, strokeDasharray: '4 4' }} />
+                        <Legend iconType="plainline" wrapperStyle={{ fontSize: '11px', paddingTop: '10px', fontWeight: 500 }} />
+                        <Line name="Actual T" type="linear" dataKey="act_T" stroke="#0A84FF" strokeWidth={3} dot={false} activeDot={{ r: 5, fill: '#0A84FF', stroke: 'var(--bg)', strokeWidth: 2 }} />
+                        <Line name="Predicted T" type="linear" dataKey="pred_T" stroke="#FF9F0A" strokeWidth={2.5} strokeDasharray="6 5" dot={false} activeDot={{ r: 5, fill: '#FF9F0A', stroke: 'var(--bg)', strokeWidth: 2 }} />
                       </LineChart>
                     </ResponsiveContainer>
                   </div>
@@ -2361,8 +2368,10 @@ export default function Dashboard() {
                 }
               ].map(m => {
                 const error = Math.abs(m.pred - m.act);
-                const mape = m.act !== 0 ? (error / m.act) * 100 : 0;
-                const accuracy = Math.max(0, 100 - mape);
+                // Use standard MAPE (Mean Absolute Percentage Error)
+                // Prevent division by zero if actual value is extremely small
+                const actualForDivision = Math.abs(m.act) < 0.001 ? 0.001 : Math.abs(m.act);
+                const accuracy = Math.max(0, 100 * (1 - error / actualForDivision));
                 
                 return (
                   <div key={m.label} style={{

@@ -14,7 +14,7 @@ H_STEAM     = 0.075    # Steam space above water  (7.5 cm → 1.9 L)
 
 # ── Volumes (m³) ──
 V_T     = A_D * H_DRUM               # Total internal volume ≈ 0.00611 m³ (~6.1 L)
-V_WATER_INIT = A_D * H_WATER_MAX    # Water volume at float_high ≈ 0.00420 m³ (~4.2 L)
+V_WATER_INIT = A_D * H_WATER_MAX    # Water volume at float_high ≈0.00420 m³ (~4.2 L)
 
 # ── Inlet / Outlet Pipes ──
 D_INLET  = 0.0127      # Water inlet diameter   (1.27 cm = ½ inch)
@@ -23,7 +23,7 @@ A_INLET  = math.pi / 4.0 * D_INLET**2   # Inlet area  ≈ 1.267e-4 m²
 A_OUTLET = math.pi / 4.0 * D_PIPE**2    # Outlet area ≈ 1.267e-4 m²
 
 # ── Metal Properties ──
-M_M     = 8.5           # Effective Mass of boiler metal & fittings (kg) - Calibrated: includes element body, flanges, pipes
+M_M     = 3.0           # Thermally-coupled metal mass (kg) - Calibrated from session data: only heater element + inner wall are in thermal equilibrium with water at 10-min timescale
 C_M     = 480.0         # Specific heat capacity of steel (J/(kg·K))
 
 # ── Flow Parameters ──
@@ -41,10 +41,10 @@ T_FEED    = 25.0        # Feed water temperature (°C)
 
 # ── Environmental & Heat Loss Parameters ──
 T_AMB     = 25.0        # Ambient temperature (°C)
-U_LOSS    = 12.0        # Overall heat loss coefficient (W/m²·K) - calibrated: natural convection + radiation at high T
+U_LOSS    = 18.0        # Overall heat loss coefficient (W/m²·K) - calibrated: natural convection + radiation at high T
 A_VESSEL  = math.pi * D_DRUM * H_DRUM + 2.0 * A_D # Total exposed surface area of the drum
 
 # ── Parasitic Steam Leak (fitting/PRV seat leakage) ──
 # Even when valve is "closed", small leaks exist through fittings and PRV seat.
-# This prevents unphysical sealed-vessel pressure runaway.
-K_LEAK    = 2e-6        # Leak conductance (kg/s per bar of gauge pressure) - calibrated to hold subcooled thermal expansion pressure
+# We set this to 0.0 so the pure physics engine accurately retains thermal expansion pressure in the subcooled regime!
+K_LEAK    = 0.0         # Leak conductance (kg/s per bar of gauge pressure)
