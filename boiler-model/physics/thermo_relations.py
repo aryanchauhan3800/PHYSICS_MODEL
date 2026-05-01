@@ -79,7 +79,14 @@ def get_rho_w_subcooled(P_pa, T_C):
     T_K = T_C + 273.15
     P_MPa = P_pa / 1e6
     try:
+        # Prevent EKF noise from crossing the saturation line and returning steam density
+        T_sat = get_T_sat(P_pa)
+        if T_K >= T_sat:
+            return get_rho_w(P_pa)
+            
         water = IAPWS97(T=T_K, P=P_MPa)
+        if water.rho < 500.0: # Safeguard against returning vapor density
+            return get_rho_w(P_pa)
         return float(water.rho)
     except Exception:
         # Fallback to saturated density if T_K is somehow out of bounds

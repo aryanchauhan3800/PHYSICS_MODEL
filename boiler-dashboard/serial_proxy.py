@@ -39,7 +39,11 @@ except Exception as e:
 # --- Calibration Offsets (from session log analysis) ---
 TEMP_CALIBRATION_OFFSET = 0.541
 THERMAL_RESISTANCE_FACTOR = 0.022
-PRESSURE_CALIBRATION_OFFSET = -0.33  # Adjusted to nullify sensor drift at cold 0 pressure (sensor ~0.78V → 0.35 bar offset)
+PRESSURE_CALIBRATION_OFFSET = -0.12  # Default fallback; will be auto-zeroed if cold start detected
+_pressure_autozero_samples = []      # Collect readings for auto-zero
+_pressure_autozero_done = False      # Flag: once set, offset is locked
+_temp_received = False               # Gate: must receive at least one real T reading first
+AUTOZERO_N_SAMPLES = 10             # Number of cold readings to average
 
 
 # ── Sensor Smoothing (Median + Outlier Rejection) ──────────────────────
@@ -397,7 +401,7 @@ autopilot_state = {
     "mode": "manual",        # manual | auto
     "target_p": 1.5,         # Target Gauge Pressure (bar)
     "status": "idle",        # idle | heating | coasting | stabilizing
-    "forecast_p_5min": 0.0
+    "forecast_p_60s": 0.0
 }
 
 
@@ -517,7 +521,7 @@ def compute_short_forecast(horizon_s=SHORT_FORECAST_SECONDS):
         }
 
 def read_serial():
-    global is_connected
+    global is_connected, _temp_received, _pressure_autozero_done, _pressure_autozero_samples, PRESSURE_CALIBRATION_OFFSET
     print(f"🔌 Opening up physical connection to {SERIAL_PORT}...")
     while True:
         try:
@@ -568,6 +572,7 @@ def read_serial():
                             smoothed = smooth_temp.update(raw_val, "Temp")
                             base_t = smoothed + TEMP_CALIBRATION_OFFSET
                             latest_data["T"] = base_t + THERMAL_RESISTANCE_FACTOR * max(0.0, base_t - 25.0)
+                            _temp_received = True
                             print(f"🌡️ TEMP DEBUG → Raw: {raw_val:.2f}°C | Smoothed: {smoothed:.2f}°C | Calibrated: {latest_data['T']:.2f}°C | Heater Q: {latest_data['Q']}W | Ready: {latest_data.get('ready', '?')}")
                         except: pass
                     elif "Pressure:" in line:
@@ -577,8 +582,15 @@ def read_serial():
                             p_val = p_val_mpa * 10.0 # Convert MPa to bar
                             # Layer 2: Median + outlier rejection (on gauge value)
                             p_smoothed = smooth_pressure.update(p_val, "Pressure")
+                            # Auto-zero: if cold and not yet calibrated, collect samples
+                            if not _pressure_autozero_done and _temp_received and latest_data.get("T", 99) < 40:
+                                _pressure_autozero_samples.append(p_smoothed)
+                                if len(_pressure_autozero_samples) >= AUTOZERO_N_SAMPLES:
+                                    PRESSURE_CALIBRATION_OFFSET = -np.mean(_pressure_autozero_samples)
+                                    _pressure_autozero_done = True
+                                    print(f"🎯 PRESSURE AUTO-ZERO: offset set to {PRESSURE_CALIBRATION_OFFSET:+.4f} bar from {AUTOZERO_N_SAMPLES} cold readings")
                             latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
-                            print(f"🔍 PRESSURE DEBUG → Raw: {p_val:.4f} | Smoothed: {p_smoothed:.4f} bar | Abs: {latest_data['P']:.4f} bar")
+                            print(f"🔍 PRESSURE DEBUG → Raw: {p_val:.4f} | Smoothed: {p_smoothed:.4f} bar | Offset: {PRESSURE_CALIBRATION_OFFSET:+.3f} | Abs: {latest_data['P']:.4f} bar")
                         except:
                             pass
                     elif "P_ADC:" in line:
@@ -588,6 +600,13 @@ def read_serial():
                             sensor_voltage = adc_voltage * 1.5
                             pressure_bar = max(0.0, min(12.0, (sensor_voltage - 0.664) * 3.0))
                             p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            # Auto-zero from ADS readings too
+                            if not _pressure_autozero_done and _temp_received and latest_data.get("T", 99) < 40:
+                                _pressure_autozero_samples.append(p_smoothed)
+                                if len(_pressure_autozero_samples) >= AUTOZERO_N_SAMPLES:
+                                    PRESSURE_CALIBRATION_OFFSET = -np.mean(_pressure_autozero_samples)
+                                    _pressure_autozero_done = True
+                                    print(f"🎯 PRESSURE AUTO-ZERO: offset set to {PRESSURE_CALIBRATION_OFFSET:+.4f} bar from {AUTOZERO_N_SAMPLES} cold readings")
                             latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
                             print(f"🔍 PRESSURE DEBUG → ADS1115 counts: {adc_raw} | ADS V: {adc_voltage:.4f} | Sensor V: {sensor_voltage:.4f} | Calc: {pressure_bar:.3f} bar gauge")
                         except:
@@ -598,6 +617,13 @@ def read_serial():
                             sensor_v = ads_v * 1.5
                             pressure_bar = max(0.0, min(12.0, (sensor_v - 0.664) * 3.0))
                             p_smoothed = smooth_pressure.update(pressure_bar, "Pressure")
+                            # Auto-zero from P_Volts readings too
+                            if not _pressure_autozero_done and _temp_received and latest_data.get("T", 99) < 40:
+                                _pressure_autozero_samples.append(p_smoothed)
+                                if len(_pressure_autozero_samples) >= AUTOZERO_N_SAMPLES:
+                                    PRESSURE_CALIBRATION_OFFSET = -np.mean(_pressure_autozero_samples)
+                                    _pressure_autozero_done = True
+                                    print(f"🎯 PRESSURE AUTO-ZERO: offset set to {PRESSURE_CALIBRATION_OFFSET:+.4f} bar from {AUTOZERO_N_SAMPLES} cold readings")
                             latest_data["P"] = p_smoothed + 1.013 + PRESSURE_CALIBRATION_OFFSET
                             print(f"🔍 PRESSURE DEBUG → ADS voltage: {ads_v:.4f} V | Sensor voltage: {sensor_v:.4f} V | Calc: {pressure_bar:.3f} bar gauge")
                         except:
@@ -841,31 +867,37 @@ def run_autopilot():
                 Q=1000.0, # What if heater is ON?
                 valve_opening=0.0,
                 T_init=T_curr,
-                duration=300.0 # 5 minutes
+                duration=60.0 # 60-second forecast
             )
 
             f_p_gauge = max(0, (P_final / 1e5) - 1.013)
-            autopilot_state["forecast_p_5min"] = round(f_p_gauge, 3)
+            autopilot_state["forecast_p_60s"] = round(f_p_gauge, 3)
 
-            # 3. Decision Logic (Proactive Control)
+            # 3. Decision Logic (Auto-Valve — heater runs until target is actually reached)
             if P_gauge >= target:
-                # Hard limit reached
+                # ── Target reached: cut heater AND open valve to vent ──
                 if latest_data["Q"] > 0:
                     command_queue.put("HEATER_OFF\n")
-                    autopilot_state["status"] = "stabilizing"
                     print(f"🤖 [Auto] Target reached ({P_gauge:.2f} bar). Cutting heat.")
-            elif f_p_gauge >= target:
-                # Proactive Cutoff: We will hit target within 5 mins due to inertia
-                if latest_data["Q"] > 0:
-                    command_queue.put("HEATER_OFF\n")
-                    autopilot_state["status"] = "coasting"
-                    print(f"🤖 [Auto] Proactive Cutoff! Predicted {f_p_gauge:.2f} bar in 5m. Coasting now.")
+                if latest_data.get("valve") != "OPEN":
+                    command_queue.put("VALVE_ON\n")
+                    print(f"🤖 [Auto] Opening valve to vent excess pressure at {P_gauge:.2f} bar (target: {target:.2f}).")
+                autopilot_state["status"] = "venting"
             elif P_gauge < (target - 0.1):
-                # Below target with hysteresis
+                # Below target with hysteresis — close valve and heat
+                if latest_data.get("valve") == "OPEN":
+                    command_queue.put("VALVE_OFF\n")
+                    print(f"🤖 [Auto] Closing valve — below target, conserving pressure.")
                 if latest_data["Q"] == 0:
                     command_queue.put("HEATER_ON\n")
                     autopilot_state["status"] = "heating"
-                    print(f"🤖 [Auto] Below target. Starting ascent.")
+                    print(f"🤖 [Auto] Below target. Heating.")
+            else:
+                # In the deadband (target - 0.1 to target): keep heating, close valve
+                if latest_data.get("valve") == "OPEN":
+                    command_queue.put("VALVE_OFF\n")
+                    print(f"🤖 [Auto] Closing valve — approaching target.")
+                autopilot_state["status"] = "stabilizing"
 
             time.sleep(5) # Control cycle interval
 

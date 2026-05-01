@@ -26,8 +26,8 @@ interface LiveData {
   autopilot?: {
     mode: 'manual' | 'auto';
     target_p: number;
-    status: 'idle' | 'heating' | 'coasting' | 'stabilizing';
-    forecast_p_5min: number;
+    status: 'idle' | 'heating' | 'coasting' | 'stabilizing' | 'venting';
+    forecast_p_60s: number;
   };
   digital_twin?: {
     efficiency: {
@@ -1453,13 +1453,13 @@ export default function Dashboard() {
                       }}>
                         <span style={{ fontSize: '12px', fontWeight: 500, color: 'var(--t3)' }}>Current Status</span>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                          <div className={liveData.autopilot?.status === 'heating' ? 'animate-pulse' : ''} style={{
+                          <div className={liveData.autopilot?.status === 'heating' || liveData.autopilot?.status === 'venting' ? 'animate-pulse' : ''} style={{
                             width: '6px', height: '6px', borderRadius: '50%',
-                            background: liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : '#8E8E93')
+                            background: liveData.autopilot?.status === 'venting' ? '#FF453A' : (liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : '#8E8E93'))
                           }} />
                           <span style={{
                             fontSize: '11px', fontWeight: 700,
-                            color: liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : 'var(--t2)'),
+                            color: liveData.autopilot?.status === 'venting' ? '#FF453A' : (liveData.autopilot?.status === 'heating' ? '#FF9F0A' : (liveData.autopilot?.status === 'coasting' ? '#32D74B' : 'var(--t2)')),
                             textTransform: 'uppercase', letterSpacing: '0.04em'
                           }}>
                             {liveData.autopilot?.status || 'Idle'}
@@ -1532,15 +1532,20 @@ export default function Dashboard() {
                       {/* Forecast Insight */}
                       <div style={{
                         padding: '12px', borderRadius: '12px',
-                        background: 'rgba(0,113,227,0.04)',
-                        border: '0.5px dashed rgba(0,113,227,0.2)',
+                        background: liveData.autopilot?.status === 'venting' ? 'rgba(255,69,58,0.06)' : 'rgba(0,113,227,0.04)',
+                        border: liveData.autopilot?.status === 'venting' ? '0.5px dashed rgba(255,69,58,0.3)' : '0.5px dashed rgba(0,113,227,0.2)',
                       }}>
                         <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '4px' }}>
-                          <Eye size={12} color="var(--blue)" />
-                          <span style={{ fontSize: '11px', fontWeight: 600, color: 'var(--blue)', letterSpacing: '0.02em', textTransform: 'uppercase' }}>5m Predictive Insight</span>
+                          <Eye size={12} color={liveData.autopilot?.status === 'venting' ? '#FF453A' : 'var(--blue)'} />
+                          <span style={{ fontSize: '11px', fontWeight: 600, color: liveData.autopilot?.status === 'venting' ? '#FF453A' : 'var(--blue)', letterSpacing: '0.02em', textTransform: 'uppercase' }}>
+                            {liveData.autopilot?.status === 'venting' ? 'Auto-Venting Active' : '5m Predictive Insight'}
+                          </span>
                         </div>
                         <p style={{ fontSize: '12.5px', color: 'var(--t1)', fontWeight: 500, lineHeight: 1.4 }}>
-                          Model predicts <span className="num" style={{ fontWeight: 700, color: 'var(--blue)' }}>{liveData.autopilot?.forecast_p_5min || '0.0'} bar</span> in 5 mins.
+                          {liveData.autopilot?.status === 'venting'
+                            ? <>Target reached — valve opened automatically. Heater cut. Pressure will stabilize at <span className="num" style={{ fontWeight: 700, color: '#FF453A' }}>{liveData.autopilot?.target_p || '1.5'} bar</span>.</>
+                            : <>Model predicts <span className="num" style={{ fontWeight: 700, color: 'var(--blue)' }}>{liveData.autopilot?.forecast_p_60s || '0.0'} bar</span> in 60 sec. Valve will auto-open at target.</>
+                          }
                         </p>
                       </div>
                     </div>
@@ -1577,7 +1582,7 @@ export default function Dashboard() {
                       <div style={{ display: 'flex', gap: '7px' }}>
                         <button
                           onClick={() => handleValveControl('open')}
-                          disabled={!liveData.connected || isValveLoading || liveData.valve === 'OPEN'}
+                          disabled={!liveData.connected || isValveLoading || liveData.valve === 'OPEN' || liveData.autopilot?.mode === 'auto'}
                           style={{
                             flex: 1,
                             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
@@ -1590,9 +1595,9 @@ export default function Dashboard() {
                               ? 'none'
                               : '0 4px 16px rgba(255,159,10,0.30)',
                             transition: 'all 0.18s var(--ease-apple)',
-                            cursor: liveData.connected && !isValveLoading && liveData.valve !== 'OPEN' ? 'pointer' : 'not-allowed',
+                            cursor: liveData.connected && !isValveLoading && liveData.valve !== 'OPEN' && liveData.autopilot?.mode !== 'auto' ? 'pointer' : 'not-allowed',
                             border: 'none',
-                            opacity: liveData.connected && liveData.valve !== 'OPEN' ? 1 : 0.5,
+                            opacity: liveData.connected && liveData.valve !== 'OPEN' && liveData.autopilot?.mode !== 'auto' ? 1 : 0.5,
                           }}
                         >
                           {isValveLoading ? <RefreshCw className="animate-spin" size={13} /> : <ArrowUpRight size={13} />}
@@ -1600,7 +1605,7 @@ export default function Dashboard() {
                         </button>
                         <button
                           onClick={() => handleValveControl('close')}
-                          disabled={!liveData.connected || isValveLoading || liveData.valve === 'CLOSED' || !liveData.valve}
+                          disabled={!liveData.connected || isValveLoading || liveData.valve === 'CLOSED' || !liveData.valve || liveData.autopilot?.mode === 'auto'}
                           style={{
                             flex: 1,
                             display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px',
@@ -1613,9 +1618,9 @@ export default function Dashboard() {
                               ? 'none'
                               : '0 4px 16px rgba(142,142,147,0.25)',
                             transition: 'all 0.18s var(--ease-apple)',
-                            cursor: liveData.connected && !isValveLoading && liveData.valve === 'OPEN' ? 'pointer' : 'not-allowed',
+                            cursor: liveData.connected && !isValveLoading && liveData.valve === 'OPEN' && liveData.autopilot?.mode !== 'auto' ? 'pointer' : 'not-allowed',
                             border: 'none',
-                            opacity: liveData.connected && liveData.valve === 'OPEN' ? 1 : 0.5,
+                            opacity: liveData.connected && liveData.valve === 'OPEN' && liveData.autopilot?.mode !== 'auto' ? 1 : 0.5,
                           }}
                         >
                           {isValveLoading ? <RefreshCw className="animate-spin" size={13} /> : <ArrowDownRight size={13} />}
