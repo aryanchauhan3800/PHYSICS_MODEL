@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef } from "react";
-import { Activity, ArrowUpRight, ArrowDownRight, ChevronRight, Droplets, Thermometer, Gauge, Zap, CircleDot, Cpu, BarChart2, Shield, Bell, Sliders, Moon, Sun, Clock, Database, Wifi, Lock, Eye, Download, RefreshCw, TrendingUp, Flame, AlertTriangle, Pin } from "lucide-react";
+import { Activity, ArrowUpRight, ArrowDownRight, ChevronRight, Droplets, Thermometer, Gauge, Zap, CircleDot, Cpu, BarChart2, Shield, Bell, Sliders, Moon, Sun, Clock, Database, Wifi, Lock, Eye, Download, RefreshCw, TrendingUp, Flame, AlertTriangle, Pin, BookOpen, Beaker, GitBranch, Layers, Box, Target, CheckCircle2, FlaskConical } from "lucide-react";
 import { AreaChart, Area, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer } from "recharts";
 import BoilerSchematic from "../components/boiler/boiler-schematic";
 import { STAT_CARDS, STATUS_ROWS, TELEMETRY, ANALYTICS_DATA } from "../lib/mock-data";
@@ -116,7 +116,7 @@ export default function Dashboard() {
     safetyAlerts: true,
     dataLogging: true,
   });
-  const NAV_ITEMS = ['Overview', 'Telemetry', 'Analytics', 'Settings'] as const;
+  const NAV_ITEMS = ['Overview', 'Telemetry', 'Analytics', 'Physics Model', 'Settings'] as const;
 
   // React State for Live Arduino Data
   const [liveData, setLiveData] = useState<LiveData>({
